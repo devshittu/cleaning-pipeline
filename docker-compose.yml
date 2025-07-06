@@ -1,0 +1,31 @@
+
+services:
+  ingestion-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ingestion-service
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+      - ./data:/app/data # For CLI batch processing
+      - ./.cache:/app/.cache # Persist spaCy model cache
+    environment:
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: INFO # Can be overridden by settings.yaml
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # Uncomment the following lines if you need GPU support for spaCy
+            # This requires the NVIDIA Container Toolkit to be installed.
+            - capabilities: [gpu]
+              count: all
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
