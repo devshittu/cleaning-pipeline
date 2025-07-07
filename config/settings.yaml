@@ -1,15 +1,27 @@
 # config/settings.yaml
 
 general:
-  log_level: DEBUG # Default log level for the application. Can be overridden by environment variable LOG_LEVEL.
-  gpu_enabled: False # Set to True if a GPU is available and you want to use it with spaCy
+  log_level: INFO # Set to INFO for production readiness, DEBUG for development
+  gpu_enabled: True # Set to True to leverage your RTX A4000
 
 ingestion_service:
   port: 8000
   model_name: "en_core_web_trf" # The spaCy model to use for NER. Change if needed.
   model_cache_dir: "/app/.cache/spacy" # Path for spaCy to cache models.
   dateparser_languages: ["en"] # Languages for dateparser to consider.
-  batch_processing_threads: 2 # Number of threads for CLI batch processing. Adjust for CPU cores.
+  batch_processing_threads: 2 # Number of threads for CLI batch processing (will be less relevant with Celery)
+
+celery:
+  broker_url: "redis://redis:6379/0" # Redis as broker
+  result_backend: "redis://redis:6379/0" # Redis as result backend
+  task_acks_late: True # Acknowledge task only after it's done
+  worker_prefetch_multiplier: 1 # Only fetch one task at a time per worker process
+  worker_concurrency: 4 # Number of worker processes. Adjust based on CPU cores (e.g., 4-8 for Threadripper)
+  # For GPU, often 1 process per GPU, but spaCy might benefit from multiple threads within that process.
+  # We'll start with processes and refine if needed.
+  task_annotations:
+    '*':
+      rate_limit: '300/m' # Example rate limit: 300 tasks per minute globally
 
 logging:
   version: 1
@@ -37,5 +49,6 @@ logging:
       handlers: [ingestion_file, console]
       level: INFO
       propagate: False
+
 
 # # config/settings.yaml
