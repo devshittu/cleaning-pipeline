@@ -6,6 +6,9 @@ spacy==3.8.0
 dateparser==1.2.0
 python-json-logger==2.0.7
 PyYAML==6.0.1
+# Celery and Redis dependencies
+celery==5.4.0
+redis==5.0.1 # For Redis broker
 
 # Dependencies for spaCy's transformer model (en_core_web_trf)
 # These are required for the model to work on CPU or GPU
