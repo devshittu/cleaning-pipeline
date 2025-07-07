@@ -23,6 +23,9 @@ from src.core.processor import preprocessor
 from src.utils.config_manager import ConfigManager
 from src.utils.logger import setup_logging
 
+# Import Celery app and task
+from src.celery_app import celery_app, preprocess_article_task
+
 # Load settings and configure logging
 settings = ConfigManager.get_settings()
 setup_logging()
@@ -59,7 +62,16 @@ async def health_check():
     Returns 200 OK if the service is running and the spaCy model is loaded.
     """
     if preprocessor.nlp is not None:
-        return {"status": "ok", "model_loaded": True}
+        # Also check Celery broker connection for a more complete health check
+        try:
+            with celery_app.connection_or_acquire() as connection:
+                connection.info()  # Try to get info from broker
+            broker_connected = True
+        except Exception as e:
+            logger.error(f"Celery broker connection failed: {e}")
+            broker_connected = False
+
+        return {"status": "ok", "model_loaded": True, "celery_broker_connected": broker_connected}
 
     logger.error("Health check failed: SpaCy model not loaded.")
     raise HTTPException(
@@ -72,7 +84,7 @@ async def health_check():
 async def preprocess_single_article(request: PreprocessSingleRequest, http_request: Request):
     """
     Accepts a single structured article and returns the processed, standardized output.
-    The document_id is carried over from the input payload.
+    This endpoint processes synchronously for immediate feedback.
     """
     article = request.article
     start_time = time.time()
@@ -117,56 +129,77 @@ async def preprocess_single_article(request: PreprocessSingleRequest, http_reque
                             detail="Internal server error during preprocessing.")
 
 
-def process_batch_in_background(articles: List[ArticleInput]):
+@app.post("/submit-batch-job", status_code=status.HTTP_202_ACCEPTED)
+async def submit_batch_job(request: PreprocessBatchRequest):
     """
-    Worker function to process a list of structured articles. This is intended to be run
-    as a background task.
-    """
-    logger.info(
-        f"Starting background task to process a batch of {len(articles)} articles.")
-
-    for i, article in enumerate(articles):
-        # Use the document_id from the payload for traceability
-        document_id = article.document_id
-
-        start_time = time.time()
-        try:
-            # Process each article, passing all relevant metadata
-            processed_data = preprocessor.preprocess(
-                text=article.text,
-                title=article.title,
-                excerpt=article.excerpt,
-                author=article.author,
-                reference_date=article.publication_date
-            )
-
-            duration = (time.time() - start_time) * 1000  # in ms
-            logger.info(f"Processed batch item {i+1}/{len(articles)}. document_id={document_id}", extra={
-                        "document_id": document_id, "duration_ms": duration})
-
-        except Exception as e:
-            # Log the failure and continue processing the rest of the batch,
-            # preventing the entire task from failing. This is basic fault tolerance.
-            logger.error(f"Error processing item {i+1} in batch. document_id={document_id}. Error: {e}",
-                         exc_info=True, extra={"document_id": document_id})
-
-    logger.info(
-        f"Background batch processing completed for {len(articles)} articles.")
-
-
-@app.post("/preprocess-batch", response_model=PreprocessBatchResponse)
-async def preprocess_batch(request: PreprocessBatchRequest, background_tasks: BackgroundTasks):
-    """
-    Accepts a list of structured articles and processes them in a background task.
-    This endpoint is non-blocking and returns an immediate acknowledgment.
+    Accepts a list of structured articles and submits them as a batch job to Celery.
+    Returns a list of task IDs for tracking. This endpoint is non-blocking.
     """
     articles = request.articles
     logger.info(
-        f"Received request to process a batch of {len(articles)} articles.")
+        f"Received request to submit a batch job for {len(articles)} articles to Celery.")
 
-    # Add the processing task to FastAPI's background tasks queue
-    background_tasks.add_task(process_batch_in_background, articles)
+    if not articles:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Batch request must contain at least one article.")
 
-    # Return an immediate response. The actual results are not returned via this endpoint.
-    return PreprocessBatchResponse(processed_articles=[])
+    task_ids = []
+    for i, article_input in enumerate(articles):
+        # Send each article as a separate task to Celery
+        # We send the article_input.model_dump() to ensure it's JSON serializable
+        task = preprocess_article_task.delay(article_input.model_dump())
+        task_ids.append(task.id)
+        logger.debug(f"Submitted article {i+1} as Celery task: {task.id}", extra={
+                     "document_id": article_input.document_id, "task_id": task.id})
 
+    return {"message": "Batch processing job submitted to Celery.", "task_ids": task_ids}
+
+
+@app.get("/batch-job-status/{task_id}")
+async def get_batch_job_status(task_id: str):
+    """
+    Retrieves the status and result of a Celery task by its ID.
+    """
+    task = celery_app.AsyncResult(task_id)
+
+    if task.state == 'PENDING':
+        response = {
+            "task_id": task.id,
+            "status": task.state,
+            "message": "Task is pending or unknown (might not have started yet or task ID is invalid)."
+        }
+    elif task.state == 'STARTED':
+        response = {
+            "task_id": task.id,
+            "status": task.state,
+            "message": "Task has started processing."
+        }
+    elif task.state == 'PROGRESS':
+        response = {
+            "task_id": task.id,
+            "status": task.state,
+            "message": "Task is in progress.",
+            "info": task.info  # Custom progress info if task updates it
+        }
+    elif task.state == 'SUCCESS':
+        response = {
+            "task_id": task.id,
+            "status": task.state,
+            "result": task.result,  # The actual processed data
+            "message": "Task completed successfully."
+        }
+    elif task.state == 'FAILURE':
+        response = {
+            "task_id": task.id,
+            "status": task.state,
+            "error": str(task.info),  # Contains the exception or error details
+            "message": "Task failed."
+        }
+    else:
+        response = {
+            "task_id": task.id,
+            "status": task.state,
+            "message": "Unknown task state."
+        }
+
+    return response
