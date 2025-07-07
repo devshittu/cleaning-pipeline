@@ -32,6 +32,22 @@ class IngestionServiceSettings(BaseModel):
     )
 
 
+class CelerySettings(BaseModel):
+    """Settings for Celery task queue."""
+    broker_url: str
+    result_backend: str
+    task_acks_late: bool
+    worker_prefetch_multiplier: int
+    worker_concurrency: int
+    # To handle the rate_limit etc.
+    task_annotations: Dict[str, Dict[str, Any]]
+
+    model_config = SettingsConfigDict(
+        arbitrary_types_allowed=True,
+        protected_namespaces=()
+    )
+
+
 class FormatterConfig(BaseModel):
     """Logging formatter configuration."""
     class_: str = Field(..., alias="class",
@@ -86,6 +102,7 @@ class Settings(BaseSettings):
     """Main settings model, loaded from a YAML file."""
     general: GeneralSettings
     ingestion_service: IngestionServiceSettings
+    celery: CelerySettings  # <--- ADDED THIS FIELD
     logging: LoggingConfig
 
     model_config = SettingsConfigDict(
@@ -128,5 +145,6 @@ if __name__ == '__main__':
     print(f"GPU Enabled: {settings.general.gpu_enabled}")
     print(f"Ingestion Port: {settings.ingestion_service.port}")
     print(f"spaCy Model: {settings.ingestion_service.model_name}")
+    print(f"Celery Broker URL: {settings.celery.broker_url}")
     print(
         f"Log Handler: {settings.logging.handlers['ingestion_file'].filename}")
