@@ -8,11 +8,10 @@ It parses command-line arguments and calls the appropriate function from src.mai
 import sys
 import os
 import logging
-import argparse  # Import argparse
-from src.main import preprocess_file  # Import the specific function
+import argparse
+from src.main import preprocess_file
 from src.utils.config_manager import ConfigManager
 from src.utils.logger import setup_logging
-# Ensure preprocessor (and spaCy model) is initialized
 from src.core.processor import preprocessor
 
 # Add src to the Python path if it's not already there.
@@ -35,6 +34,7 @@ def main():
     Main function to parse arguments and dispatch to CLI commands.
     """
     # Ensure the spaCy model is loaded for the CLI to work.
+    # This also triggers the singleton initialization of TextPreprocessor.
     _ = preprocessor.nlp
     logger.info("SpaCy model initialized for CLI.")
 
@@ -42,7 +42,6 @@ def main():
         description="CLI for the Data Ingestion & Preprocessing Microservice."
     )
 
-    # Subparsers for different commands
     subparsers = parser.add_subparsers(
         dest="command", help="Available commands")
 
@@ -58,15 +57,18 @@ def main():
         "--output-path", "-o", type=str, required=True,
         help="Path to the output file (JSONL format)."
     )
+    preprocess_parser.add_argument(
+        "--use-celery", action="store_true",
+        help="Submit batch processing tasks to Celery for asynchronous execution."
+    )
 
     args = parser.parse_args()
 
     if args.command == "preprocess-file":
         logger.debug(f"Executing preprocess-file command with args: {args}")
         preprocess_file(input_path=args.input_path,
-                        output_path=args.output_path)
+                        output_path=args.output_path, use_celery=args.use_celery)
     else:
-        # If no command or an unknown command is given, show help
         parser.print_help()
         sys.exit(1)
 
