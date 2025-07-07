@@ -55,9 +55,14 @@ def _process_single_article(article_data: Dict[str, Any]) -> Optional[Preprocess
         document_id = input_article.document_id
         logger_extra = {"document_id": document_id}
 
-        # 2. Core Processing: Process the text using the core preprocessor, passing the reference date.
+        # 2. Core Processing: Process the text and all relevant metadata using the core preprocessor.
         processed_data_dict = preprocessor.preprocess(
-            input_article.text, reference_date=input_article.publication_date)
+            text=input_article.text,
+            title=input_article.title,
+            excerpt=input_article.excerpt,
+            author=input_article.author,
+            reference_date=input_article.publication_date
+        )
 
         # 3. Output Data Validation: Validate the output data against the response schema.
         processed_data_response = PreprocessSingleResponse(
@@ -153,4 +158,3 @@ if __name__ == "__main__":
     # Debug: Log before running Typer app
     logger.debug("Running Typer app...")
     app()
-

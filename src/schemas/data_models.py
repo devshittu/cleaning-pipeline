@@ -76,6 +76,14 @@ class PreprocessSingleResponse(BaseModel):
     original_text: str = Field(..., description="The original input text.")
     cleaned_text: str = Field(...,
                               description="The cleaned and normalized text.")
+    # New fields for cleaned metadata
+    cleaned_title: Optional[str] = Field(
+        None, description="The cleaned and normalized title of the article.")
+    cleaned_excerpt: Optional[str] = Field(
+        None, description="The cleaned and normalized excerpt of the article.")
+    cleaned_author: Optional[str] = Field(
+        None, description="The cleaned and normalized author name.")
+
     temporal_metadata: Optional[str] = Field(
         None, description="The normalized date in ISO 8601 format (YYYY-MM-DD), if found.")
     entities: List[Entity] = Field(

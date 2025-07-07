@@ -83,9 +83,14 @@ async def preprocess_single_article(request: PreprocessSingleRequest, http_reque
                 "document_id": document_id, "endpoint": "/preprocess-single"})
 
     try:
-        # Pass the text and the crucial publication_date to the processor
+        # Pass the text and all relevant metadata to the processor
         processed_data = preprocessor.preprocess(
-            article.text, reference_date=article.publication_date)
+            text=article.text,
+            title=article.title,
+            excerpt=article.excerpt,
+            author=article.author,
+            reference_date=article.publication_date
+        )
 
         # Construct the response model using the input document_id
         response = PreprocessSingleResponse(
@@ -126,9 +131,14 @@ def process_batch_in_background(articles: List[ArticleInput]):
 
         start_time = time.time()
         try:
-            # Process each article, passing the publication date for temporal context
+            # Process each article, passing all relevant metadata
             processed_data = preprocessor.preprocess(
-                article.text, reference_date=article.publication_date)
+                text=article.text,
+                title=article.title,
+                excerpt=article.excerpt,
+                author=article.author,
+                reference_date=article.publication_date
+            )
 
             duration = (time.time() - start_time) * 1000  # in ms
             logger.info(f"Processed batch item {i+1}/{len(articles)}. document_id={document_id}", extra={
@@ -159,3 +169,4 @@ async def preprocess_batch(request: PreprocessBatchRequest, background_tasks: Ba
 
     # Return an immediate response. The actual results are not returned via this endpoint.
     return PreprocessBatchResponse(processed_articles=[])
+
