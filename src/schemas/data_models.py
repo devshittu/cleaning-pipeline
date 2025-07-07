@@ -73,9 +73,18 @@ class PreprocessSingleResponse(BaseModel):
     document_id: str = Field(
         ..., description="A unique identifier for the processed document, carried from the input payload.")
     version: str = Field("1.0", description="Schema version for this output.")
+    # Keep for single API response
     original_text: str = Field(..., description="The original input text.")
     cleaned_text: str = Field(...,
                               description="The cleaned and normalized text.")
+    # New fields for cleaned metadata
+    cleaned_title: Optional[str] = Field(
+        None, description="The cleaned and normalized title of the article.")
+    cleaned_excerpt: Optional[str] = Field(
+        None, description="The cleaned and normalized excerpt of the article.")
+    cleaned_author: Optional[str] = Field(
+        None, description="The cleaned and normalized author name.")
+
     temporal_metadata: Optional[str] = Field(
         None, description="The normalized date in ISO 8601 format (YYYY-MM-DD), if found.")
     entities: List[Entity] = Field(
@@ -90,17 +99,21 @@ class PreprocessBatchRequest(BaseModel):
 
 class PreprocessBatchResponse(BaseModel):
     """Response model for the result of a batch processing job."""
+    # Note: For batch API, typically you'd return either a list of results or a job ID.
+    # The current implementation processes in background and returns an empty list.
     processed_articles: List[PreprocessSingleResponse] = Field(
         ..., description="A list of processed outputs for each article in the batch.")
 
 
 class PreprocessFileResult(BaseModel):
     """
-    Model for a single line in the output JSONL file.
-    Includes the unique document ID to ensure traceability in offline processing.
+    Model for a single line in the output JSONL file for batch CLI processing.
+    It includes the unique document ID and the full processed data.
+    The 'original_text' is removed from this top-level model to avoid redundancy,
+    as it's already present within 'processed_data'.
     """
     document_id: str = Field(...,
                              description="A unique identifier for the processed document.")
     version: str = Field("1.0", description="Schema version for this output.")
-    original_text: str
+    # original_text: str # REMOVED: This field is now only inside processed_data to avoid redundancy
     processed_data: PreprocessSingleResponse
