@@ -12,7 +12,7 @@ from typing import Optional, List, Dict, Any
 import dateparser
 from src.utils.config_manager import ConfigManager
 from src.schemas.data_models import Entity
-from datetime import date, datetime  # Import datetime
+from datetime import date, datetime, timedelta  # Import timedelta
 import os
 
 logger = logging.getLogger("ingestion_service")
@@ -98,13 +98,49 @@ class TextPreprocessor:
         cleaned = self.clean_text(field_value)
         return cleaned if cleaned else None  # Return None if cleaned string is empty
 
-    def extract_temporal_metadata(self, text: str, reference_date: Optional[date] = None) -> Optional[str]:
+    def _get_last_weekday(self, weekday_name: str, reference_date: datetime) -> Optional[date]:
         """
-        Extracts and normalizes temporal metadata (dates) from the text, using
-        a reference date to resolve ambiguity.
+        Calculates the date of the most recent occurrence of a specific weekday
+        prior to or on the reference_date.
 
         Args:
-            text: The text to parse.
+            weekday_name: The name of the weekday (e.g., "Monday", "Friday").
+            reference_date: The datetime object to use as the reference point.
+
+        Returns:
+            A datetime.date object for the last occurrence of the weekday, or None if invalid.
+        """
+        weekdays = {
+            "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+            "friday": 4, "saturday": 5, "sunday": 6
+        }
+        weekday_name_lower = weekday_name.lower()
+
+        if weekday_name_lower not in weekdays:
+            logger.warning(f"Invalid weekday name provided: {weekday_name}")
+            return None
+
+        target_weekday = weekdays[weekday_name_lower]
+        # Calculate days to subtract to get to the last occurrence of the target weekday
+        # (reference_date.weekday() - target_weekday + 7) % 7 gives the number of days
+        # to go back to find the *most recent* target weekday, including today if it is that weekday.
+        # If we want strictly *last* (not including today), we need to adjust.
+        # For "last Friday" relative to a Friday, we want the Friday of the previous week.
+        days_ago = (reference_date.weekday() - target_weekday + 7) % 7
+        if days_ago == 0:  # If reference_date is the target weekday, go back a full week
+            days_ago = 7
+
+        last_weekday_date = reference_date - timedelta(days=days_ago)
+        return last_weekday_date.date()  # Return as date object
+
+    def extract_temporal_metadata(self, text_to_parse: str, reference_date: Optional[date] = None) -> Optional[str]:
+        """
+        Extracts and normalizes temporal metadata (dates) from the text, using
+        a reference date to resolve ambiguity. This function is now designed to
+        receive a more specific date string (e.g., from an NER entity).
+
+        Args:
+            text_to_parse: The specific text string to parse for a date (e.g., "last Friday").
             reference_date: The date to use as a context for relative expressions
                             (e.g., 'yesterday' becomes a concrete date relative to this date).
                             Expected to be a datetime.date object.
@@ -129,16 +165,44 @@ class TextPreprocessor:
                 logger.warning(
                     f"Unexpected type for reference_date: {type(reference_date)}. Expected datetime.date or datetime.datetime.")
 
+        logger.debug(
+            f"Attempting to parse date: '{text_to_parse}' with reference_date: {parsed_reference_date}")
+
+        # --- Custom logic for "last [weekday]" pattern ---
+        match = re.match(r'last\s+([a-zA-Z]+)', text_to_parse, re.IGNORECASE)
+        if match and parsed_reference_date:
+            weekday_name = match.group(1)
+            calculated_date = self._get_last_weekday(
+                weekday_name, parsed_reference_date)
+            if calculated_date:
+                logger.debug(
+                    f"Custom logic for 'last {weekday_name}' returned: {calculated_date}")
+                return calculated_date.strftime('%Y-%m-%d')
+            else:
+                logger.debug(
+                    f"Custom logic for 'last {weekday_name}' failed to calculate date.")
+
+        # --- Fallback to dateparser for other patterns ---
         try:
-            date_obj = dateparser.parse(text, languages=languages, settings={
-                                        'RELATIVE_BASE': parsed_reference_date})
+            date_obj = dateparser.parse(
+                text_to_parse,
+                languages=languages,
+                settings={
+                    'RELATIVE_BASE': parsed_reference_date,
+                    'PREFER_DATES_FROM': 'past',
+                    'STRICT_PARSING': True
+                }
+            )
+            logger.debug(f"dateparser.parse returned: {date_obj}")
+
             if date_obj:
-                # Format to YYYY-MM-DD as requested
+                # Format toYYYY-MM-DD as requested
                 return date_obj.strftime('%Y-%m-%d')
+            logger.debug(f"Date parsing for '{text_to_parse}' returned None.")
             return None
         except Exception as e:
             logger.warning(
-                f"Failed to parse date from text: '{text[:50]}...'. Error: {e}")
+                f"Failed to parse date from text: '{text_to_parse[:50]}...'. Error: {e}", exc_info=True)
             return None
 
     def tag_entities(self, text: str) -> List[Entity]:
@@ -217,12 +281,23 @@ class TextPreprocessor:
         cleaned_excerpt = self.clean_metadata_field(excerpt)
         cleaned_author = self.clean_metadata_field(author)
 
-        # 3. Temporal Metadata Extraction with context
-        temporal_metadata = self.extract_temporal_metadata(
-            cleaned_text, reference_date=reference_date)
-
-        # 4. Basic Entity Tagging
+        # 3. Basic Entity Tagging (do this before temporal extraction for better context)
         entities = self.tag_entities(cleaned_text)
+
+        # 4. Temporal Metadata Extraction with context
+        # Prioritize parsing from a specific DATE entity if found, otherwise use the full cleaned text
+        date_text_for_parsing = None
+        for ent in entities:
+            if ent.type == "DATE":
+                date_text_for_parsing = ent.text
+                break  # Take the first DATE entity found
+
+        if date_text_for_parsing is None:
+            # Fallback: if no DATE entity found, try parsing from the cleaned text (less precise)
+            date_text_for_parsing = cleaned_text
+
+        temporal_metadata = self.extract_temporal_metadata(
+            date_text_for_parsing, reference_date=reference_date)
 
         processed_data = {
             "original_text": text,
