@@ -1,10 +1,11 @@
 """
 main.py
 
-Main entry point for the CLI. Handles bulk file processing.
+Contains the core CLI logic for batch file processing using argparse.
+This file defines the `preprocess_file` function and helper logic,
+which will be called by `src/main_cli.py`.
 """
 
-import typer
 import logging
 import json
 import sys
@@ -14,31 +15,23 @@ from tqdm import tqdm
 from pathlib import Path
 from pydantic import ValidationError
 from datetime import date
-import uuid
+import argparse  # Import argparse
 
 from src.core.processor import preprocessor
 from src.schemas.data_models import ArticleInput, PreprocessFileResult, PreprocessSingleResponse
 from src.utils.config_manager import ConfigManager
 from src.utils.logger import setup_logging
 
-# Initialize Typer CLI app
-app = typer.Typer(
-    name="ingestion-cli",
-    help="CLI for the Data Ingestion & Preprocessing Microservice."
-)
-
 # Load settings and configure logging once on startup
+# Note: In a production environment, logging setup might be handled by the entrypoint
+# script (main_cli.py) or a parent process to ensure it's configured before any
+# module-level logging calls. For now, keeping it here for simplicity.
 settings = ConfigManager.get_settings()
 setup_logging()
 logger = logging.getLogger("ingestion_service")
 
-# Debug: Log Typer initialization and command-line arguments
-logger.debug(f"Typer app initialized with name: {app.info.name}")
-logger.debug(f"Command-line arguments: {sys.argv}")
-
-# Debug: Log registered commands
-registered_commands = [cmd.name for cmd in app.registered_commands]
-logger.debug(f"Registered Typer commands: {registered_commands}")
+# Debug: Log initialization (no Typer app here anymore)
+logger.debug("main.py initialized for argparse CLI.")
 
 
 def _process_single_article(article_data: Dict[str, Any]) -> Optional[PreprocessFileResult]:
@@ -53,7 +46,6 @@ def _process_single_article(article_data: Dict[str, Any]) -> Optional[Preprocess
 
         # Use the document_id from the validated input for all logging
         document_id = input_article.document_id
-        logger_extra = {"document_id": document_id}
 
         # 2. Core Processing: Process the text and all relevant metadata using the core preprocessor.
         processed_data_dict = preprocessor.preprocess(
@@ -90,30 +82,29 @@ def _process_single_article(article_data: Dict[str, Any]) -> Optional[Preprocess
         return None
 
 
-@app.command("preprocess-file")
-def preprocess_file(
-    input_path: Path = typer.Option(..., "--input-path", "-i",
-                                    help="Path to the input file (JSONL format, one JSON object per line)."),
-    output_path: Path = typer.Option(..., "--output-path",
-                                     "-o", help="Path to the output file (JSONL format).")
-):
+def preprocess_file(input_path: str, output_path: str):
     """
     Processes a file containing structured article objects (one per line) in parallel.
     Each JSON object is expected to conform to the ArticleInput schema.
     """
-    if not input_path.exists():
-        typer.echo(f"Error: Input file not found at {input_path}", err=True)
-        raise typer.Exit(code=1)
+    input_file_path = Path(input_path)
+    output_file_path = Path(output_path)
 
-    typer.echo(f"Starting batch preprocessing of file: {input_path}")
-    logger.info(f"Starting CLI batch processing from file '{input_path}'.")
+    if not input_file_path.exists():
+        print(
+            f"Error: Input file not found at {input_file_path}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Starting batch preprocessing of file: {input_file_path}")
+    logger.info(
+        f"Starting CLI batch processing from file '{input_file_path}'.")
 
     # Read all lines from the input file
-    with open(input_path, 'r', encoding='utf-8') as f:
+    with open(input_file_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
 
     num_threads = settings.ingestion_service.batch_processing_threads
-    typer.echo(f"Using {num_threads} threads for parallel processing...")
+    print(f"Using {num_threads} threads for parallel processing...")
 
     output_lines = []
 
@@ -142,19 +133,11 @@ def preprocess_file(
                 output_lines.append(processed_result.model_dump_json())
 
     # Write the processed outputs to the output file in JSONL format
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_file_path, 'w', encoding='utf-8') as f:
         for line in output_lines:
             f.write(line + '\n')
 
-    typer.echo(
-        f"Processing complete. Processed {len(output_lines)} out of {len(lines)} lines successfully. Results written to: {output_path}")
+    print(
+        f"Processing complete. Processed {len(output_lines)} out of {len(lines)} lines successfully. Results written to: {output_file_path}")
     logger.info(
-        f"CLI batch processing finished. Results saved to '{output_path}'.")
-
-
-if __name__ == "__main__":
-    # Ensure the spaCy model is loaded for the CLI to work.
-    preprocessor
-    # Debug: Log before running Typer app
-    logger.debug("Running Typer app...")
-    app()
+        f"CLI batch processing finished. Results saved to '{output_file_path}'.")
