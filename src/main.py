@@ -53,7 +53,17 @@ def _process_single_article(article_data: Dict[str, Any]) -> Optional[Preprocess
             title=input_article.title,
             excerpt=input_article.excerpt,
             author=input_article.author,
-            reference_date=input_article.publication_date
+            reference_date=input_article.publication_date,
+            categories=input_article.categories,
+            tags=input_article.tags,
+            geographical_data=input_article.geographical_data,
+            embargo_date=input_article.embargo_date,
+            media_asset_urls=input_article.media_asset_urls,
+            revision_date=input_article.revision_date,
+            source_url=input_article.source_url,
+            sentiment=input_article.sentiment,
+            word_count=input_article.word_count,
+            publisher=input_article.publisher
         )
 
         # 3. Output Data Validation and return as dictionary
@@ -66,6 +76,7 @@ def _process_single_article(article_data: Dict[str, Any]) -> Optional[Preprocess
         # 4. Construct the final result object with the unique ID.
         return PreprocessFileResult(
             document_id=document_id,
+            version="1.0",  # Ensure version is set for PreprocessFileResult
             processed_data=response  # original_text is inside processed_data
         )
 
