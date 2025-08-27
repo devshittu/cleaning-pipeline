@@ -60,7 +60,16 @@ class ArticleInput(BaseModel):
         None, description="A list of tags associated with the article for fine-grained classification.")
     media_asset_urls: Optional[List[HttpUrl]] = Field(
         None, description="A list of URLs pointing to media assets (images, videos) associated with the article.")
-
+    geographical_data: Optional[Dict[str, Any]] = Field(
+        None, description="Geographical metadata associated with the article (e.g., location, coordinates).")
+    embargo_date: Optional[date] = Field(
+        None, description="The embargo date of the article, if applicable.")
+    sentiment: Optional[str] = Field(
+        None, description="Sentiment associated with the article (e.g., positive, negative, neutral).")
+    word_count: Optional[int] = Field(
+        None, description="Word count of the article text.")
+    publisher: Optional[str] = Field(
+        None, description="The publisher of the article.")
     additional_metadata: Optional[Dict[str, Any]] = Field(
         None, description="A dictionary containing additional metadata fields. All fields within this dictionary are optional."
     )
@@ -106,7 +115,16 @@ class PreprocessSingleResponse(BaseModel):
         None, description="Cleaned and normalized tags associated with the article.")
     cleaned_media_asset_urls: Optional[List[HttpUrl]] = Field(
         None, description="Cleaned and normalized URLs pointing to media assets associated with the article.")
-
+    cleaned_geographical_data: Optional[Dict[str, Any]] = Field(
+        None, description="Cleaned and normalized geographical metadata.")
+    cleaned_embargo_date: Optional[date] = Field(
+        None, description="Cleaned and normalized embargo date.")
+    cleaned_sentiment: Optional[str] = Field(
+        None, description="Cleaned and normalized sentiment.")
+    cleaned_word_count: Optional[int] = Field(
+        None, description="Cleaned or computed word count.")
+    cleaned_publisher: Optional[str] = Field(
+        None, description="Cleaned and normalized publisher name.")
     temporal_metadata: Optional[str] = Field(
         None, description="The normalized date in ISO 8601 format (YYYY-MM-DD), if found (derived from text).")
     entities: List[Entity] = Field(
