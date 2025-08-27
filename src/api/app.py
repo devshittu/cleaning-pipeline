@@ -19,7 +19,7 @@ from src.schemas.data_models import (
     PreprocessBatchRequest,
     PreprocessBatchResponse
 )
-from src.core.processor import preprocessor
+from src.core.processor import TextPreprocessor
 from src.utils.config_manager import ConfigManager
 from src.utils.logger import setup_logging
 
@@ -38,21 +38,9 @@ app = FastAPI(
     version="1.0.0"
 )
 
-
-@app.on_event("startup")
-async def startup_event():
-    """Startup event for the Ingestion service."""
-    logger.info("Ingestion Service starting up...")
-    try:
-        # Accessing the preprocessor ensures the model is loaded on startup
-        _ = preprocessor.nlp
-        logger.info("Ingestion Service startup complete. SpaCy model is ready.")
-    except Exception as e:
-        logger.critical(
-            f"Failed to initialize preprocessor model at startup: {e}", exc_info=True)
-        # We raise a critical exception to prevent the service from running if the model isn't loaded.
-        raise RuntimeError(
-            "Could not initialize service. Check logs for model loading errors.")
+# This is a global variable. A new TextPreprocessor will be loaded once per Uvicorn worker process.
+# This approach is safe and efficient.
+preprocessor = TextPreprocessor()
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)
@@ -62,10 +50,9 @@ async def health_check():
     Returns 200 OK if the service is running and the spaCy model is loaded.
     """
     if preprocessor.nlp is not None:
-        # Also check Celery broker connection for a more complete health check
         try:
             with celery_app.connection_or_acquire() as connection:
-                connection.info()  # Try to get info from broker
+                connection.info()
             broker_connected = True
         except Exception as e:
             logger.error(f"Celery broker connection failed: {e}")
@@ -89,29 +76,49 @@ async def preprocess_single_article(request: PreprocessSingleRequest, http_reque
     article = request.article
     start_time = time.time()
 
-    # Use the document_id from the payload for traceability
     document_id = article.document_id
     logger.info(f"Received request for document_id={document_id}.", extra={
                 "document_id": document_id, "endpoint": "/preprocess-single"})
 
     try:
-        # Pass the text and all relevant metadata to the processor
         processed_data = preprocessor.preprocess(
+            document_id=article.document_id,
             text=article.text,
             title=article.title,
             excerpt=article.excerpt,
             author=article.author,
-            reference_date=article.publication_date
+            publication_date=article.publication_date,
+            revision_date=article.revision_date,
+            source_url=article.source_url,
+            categories=article.categories,
+            tags=article.tags,
+            media_asset_urls=article.media_asset_urls,
+            additional_metadata=article.additional_metadata
         )
 
-        # Construct the response model using the input document_id
         response = PreprocessSingleResponse(
             document_id=document_id,
             version="1.0",
-            **processed_data
+            original_text=processed_data.get("original_text", ""),
+            cleaned_text=processed_data.get("cleaned_text", ""),
+            cleaned_title=processed_data.get("cleaned_title"),
+            cleaned_excerpt=processed_data.get("cleaned_excerpt"),
+            cleaned_author=processed_data.get("cleaned_author"),
+            cleaned_publication_date=processed_data.get(
+                "cleaned_publication_date"),
+            cleaned_revision_date=processed_data.get("cleaned_revision_date"),
+            cleaned_source_url=processed_data.get("cleaned_source_url"),
+            cleaned_categories=processed_data.get("cleaned_categories"),
+            cleaned_tags=processed_data.get("cleaned_tags"),
+            cleaned_media_asset_urls=processed_data.get(
+                "cleaned_media_asset_urls"),
+            temporal_metadata=processed_data.get("temporal_metadata"),
+            entities=processed_data.get("entities", []),
+            cleaned_additional_metadata=processed_data.get(
+                "cleaned_additional_metadata")
         )
 
-        duration = (time.time() - start_time) * 1000  # in ms
+        duration = (time.time() - start_time) * 1000
         logger.info(f"Successfully processed document_id={document_id} in {duration:.2f}ms.", extra={
                     "document_id": document_id, "duration_ms": duration})
 
@@ -145,9 +152,7 @@ async def submit_batch_job(request: PreprocessBatchRequest):
 
     task_ids = []
     for i, article_input in enumerate(articles):
-        # Send each article as a separate task to Celery
-        # We send the article_input.model_dump() to ensure it's JSON serializable
-        task = preprocess_article_task.delay(article_input.model_dump())
+        task = preprocess_article_task.delay(article_input.model_dump_json())
         task_ids.append(task.id)
         logger.debug(f"Submitted article {i+1} as Celery task: {task.id}", extra={
                      "document_id": article_input.document_id, "task_id": task.id})
@@ -179,20 +184,20 @@ async def get_batch_job_status(task_id: str):
             "task_id": task.id,
             "status": task.state,
             "message": "Task is in progress.",
-            "info": task.info  # Custom progress info if task updates it
+            "info": task.info
         }
     elif task.state == 'SUCCESS':
         response = {
             "task_id": task.id,
             "status": task.state,
-            "result": task.result,  # The actual processed data
+            "result": task.result,
             "message": "Task completed successfully."
         }
     elif task.state == 'FAILURE':
         response = {
             "task_id": task.id,
             "status": task.state,
-            "error": str(task.info),  # Contains the exception or error details
+            "error": str(task.info),
             "message": "Task failed."
         }
     else:
@@ -203,3 +208,5 @@ async def get_batch_job_status(task_id: str):
         }
 
     return response
+
+# api/app.py

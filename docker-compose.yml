@@ -1,4 +1,4 @@
-
+# docker-compose.yml
 services:
   ingestion-service:
     build:
@@ -52,7 +52,7 @@ services:
     container_name: celery-worker
     # Changed --pool=fork to --pool=prefork for Celery 5.x compatibility.
     # 'prefork' is the default process-based pool.
-    command: celery -A src.celery_app worker --loglevel=INFO --pool=prefork --concurrency=4
+    command: celery -A src.celery_app worker --loglevel=DEBUG --pool=prefork --concurrency=1
     # Use --pool=solo or --pool=prefork with concurrency=1 if GPU is used per-process
     # For Threadripper, we can use multiple processes (--concurrency)
     volumes:
@@ -74,5 +74,34 @@ services:
     depends_on:
       - redis # Ensure Redis is up before Celery workers
 
+  # Uncomment if using Elasticsearch
+  # elasticsearch:
+  #   image: docker.elastic.co/elasticsearch/elasticsearch:8.14.0
+  #   container_name: elasticsearch
+  #   environment:
+  #     - xpack.security.enabled=false # For simplicity in testing, disable security
+  #     - discovery.type=single-node
+  #   ports:
+  #     - "9200:9200"
+  #     - "9300:9300"
+  #   volumes:
+  #     - es_data:/usr/share/elasticsearch/data
+  #   restart: on-failure
+
+  # Uncomment if using PostgreSQL
+  # postgres:
+  #   image: postgres:16.3-alpine
+  #   container_name: postgres
+  #   environment:
+  #     POSTGRES_DB: newsdb
+  #     POSTGRES_USER: user
+  #     POSTGRES_PASSWORD: password
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - pg_data:/var/lib/postgresql/data
+  #   restart: on-failure
 volumes:
   redis_data:
+  es_data:
+  pg_data:

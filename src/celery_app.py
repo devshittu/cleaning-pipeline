@@ -1,37 +1,29 @@
 """
 src/celery_app.py
 
-Defines the Celery application instance and registers tasks.
-This file is the entry point for Celery workers.
+Defines the Celery application and tasks for asynchronous processing.
 """
 
-import os
+import json
 import logging
 from celery import Celery
+from celery import signals
+from src.core.processor import TextPreprocessor
+from src.schemas.data_models import ArticleInput, PreprocessSingleResponse
 from src.utils.config_manager import ConfigManager
-from src.utils.logger import setup_logging
-# Import preprocessor for task execution
-from src.core.processor import preprocessor
-from src.schemas.data_models import ArticleInput, PreprocessFileResult, PreprocessSingleResponse
-from pydantic import ValidationError
-import time
-import json
-from typing import Optional, Dict, Any  # <--- ADDED Dict and Any here
+from typing import Dict, Any
 
-# Load settings and configure logging
 settings = ConfigManager.get_settings()
-setup_logging()
 logger = logging.getLogger("ingestion_service")
 
-# Initialize Celery app
-# Use environment variables for broker/backend for better Docker integration
+# Initialize the Celery app with a specific name and broker/backend from settings.
 celery_app = Celery(
-    "ingestion_tasks",
-    broker=os.getenv("CELERY_BROKER_URL", settings.celery.broker_url),
-    backend=os.getenv("CELERY_RESULT_BACKEND", settings.celery.result_backend)
+    "ingestion_service",
+    broker=settings.celery.broker_url,
+    backend=settings.celery.result_backend
 )
 
-# Configure Celery from settings.yaml
+# Apply Celery configurations from settings.
 celery_app.conf.update(
     task_acks_late=settings.celery.task_acks_late,
     worker_prefetch_multiplier=settings.celery.worker_prefetch_multiplier,
@@ -39,72 +31,102 @@ celery_app.conf.update(
     task_annotations=settings.celery.task_annotations
 )
 
-# Optional: Ensure spaCy model is loaded when worker starts
-# This is crucial for performance and avoiding re-loading per task
+# A global variable to hold the TextPreprocessor instance per worker process.
+# It will be set by the signal handler below.
+preprocessor = None
 
 
-@celery_app.on_after_configure.connect
-def setup_spacy_model(sender, **kwargs):
+@signals.worker_process_init.connect
+def initialize_preprocessor(**kwargs):
     """
-    Ensures the spaCy model is loaded once per Celery worker process.
+    This signal handler runs when each Celery worker process is initialized.
+    It's the perfect place to load the heavy spaCy model to ensure a clean
+    GPU context for each worker.
     """
-    logger.info("Celery worker starting up. Initializing spaCy model...")
-    try:
-        _ = preprocessor.nlp
-        logger.info("SpaCy model loaded successfully in Celery worker.")
-    except Exception as e:
-        logger.critical(
-            f"Failed to load spaCy model in Celery worker: {e}", exc_info=True)
-        raise RuntimeError(
-            "Celery worker could not start due to spaCy model loading failure.")
+    global preprocessor
+    logger.info(
+        "Celery worker process initializing. Loading TextPreprocessor instance.")
+    preprocessor = TextPreprocessor()
 
 
-@celery_app.task(bind=True, name="preprocess_article_task")
-def preprocess_article_task(self, article_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+@celery_app.task(name="preprocess_article", bind=True)
+def preprocess_article_task(self, article_data_json: str) -> Dict[str, Any]:
     """
     Celery task to preprocess a single article.
-    This task is designed to be robust and fault-tolerant.
+    It receives the article data as a JSON string to ensure proper serialization.
     """
-    document_id = article_data.get("document_id", "N/A")
-    logger.info(f"Celery task received for document_id={document_id}. Task ID: {self.request.id}", extra={
-                "document_id": document_id, "task_id": self.request.id})
-    start_time = time.time()
+    global preprocessor
+    if preprocessor is None:
+        # This is a fallback in case the signal handler failed, though it
+        # should not be needed with the worker_process_init signal.
+        logger.warning(
+            "Preprocessor not initialized. Initializing within task.")
+        preprocessor = TextPreprocessor()
 
+    document_id = "unknown"  # Default for logging in case of early failure
     try:
-        # 1. Input Data Validation (re-validate inside task for robustness)
-        input_article = ArticleInput.model_validate(article_data)
+        # Pydantic's model_validate_json deserializes the JSON string back into a Pydantic model.
+        article_input = ArticleInput.model_validate_json(article_data_json)
+        document_id = article_input.document_id  # Update document_id for logging
 
-        # 2. Core Processing
-        processed_data_dict = preprocessor.preprocess(
-            text=input_article.text,
-            title=input_article.title,
-            excerpt=input_article.excerpt,
-            author=input_article.author,
-            reference_date=input_article.publication_date
+        logger.info(f"Celery task received article for document_id={document_id}.", extra={
+                    "document_id": document_id})
+
+        processed_data = preprocessor.preprocess(
+            document_id=article_input.document_id,
+            text=article_input.text,
+            title=article_input.title,
+            excerpt=article_input.excerpt,
+            author=article_input.author,
+            publication_date=article_input.publication_date,
+            revision_date=article_input.revision_date,
+            source_url=article_input.source_url,
+            categories=article_input.categories,
+            tags=article_input.tags,
+            media_asset_urls=article_input.media_asset_urls,
+            additional_metadata=article_input.additional_metadata
         )
 
-        # 3. Output Data Validation and return as dictionary
         response = PreprocessSingleResponse(
-            document_id=input_article.document_id,
+            document_id=document_id,
             version="1.0",
-            **processed_data_dict
+            original_text=processed_data.get("original_text", ""),
+            cleaned_text=processed_data.get("cleaned_text", ""),
+            cleaned_title=processed_data.get("cleaned_title"),
+            cleaned_excerpt=processed_data.get("cleaned_excerpt"),
+            cleaned_author=processed_data.get("cleaned_author"),
+            cleaned_publication_date=processed_data.get(
+                "cleaned_publication_date"),
+            cleaned_revision_date=processed_data.get("cleaned_revision_date"),
+            cleaned_source_url=processed_data.get("cleaned_source_url"),
+            cleaned_categories=processed_data.get("cleaned_categories"),
+            cleaned_tags=processed_data.get("cleaned_tags"),
+            cleaned_media_asset_urls=processed_data.get(
+                "cleaned_media_asset_urls"),
+            temporal_metadata=processed_data.get("temporal_metadata"),
+            entities=processed_data.get("entities", []),
+            cleaned_additional_metadata=processed_data.get(
+                "cleaned_additional_metadata")
         )
 
-        duration = (time.time() - start_time) * 1000  # in ms
-        logger.info(f"Celery task completed for document_id={document_id} in {duration:.2f}ms.", extra={
-                    "document_id": document_id, "task_id": self.request.id, "duration_ms": duration})
+        logger.info(f"Celery task successfully processed document_id={document_id}.", extra={
+                    "document_id": document_id})
 
-        # Return the dictionary representation of the Pydantic model
-        return response.model_dump()
+        # The core of the fix: ensure the result is a dictionary with no
+        # Pydantic Url objects, as Celery's serializer cannot handle them.
+        response_dict = response.model_dump()
+        if response_dict.get('cleaned_source_url') is not None:
+            response_dict['cleaned_source_url'] = str(
+                response_dict['cleaned_source_url'])
+        if response_dict.get('cleaned_media_asset_urls') is not None:
+            response_dict['cleaned_media_asset_urls'] = [
+                str(url) for url in response_dict['cleaned_media_asset_urls']]
 
-    except ValidationError as e:
-        logger.error(f"Celery task validation failed for document_id={document_id}. Error: {e.errors()}", extra={
-                     "document_id": document_id, "task_id": self.request.id, "raw_input_sample": str(article_data)[:200]})
-        # Optionally, raise a custom exception or return a specific error structure
-        return {"error": "ValidationError", "details": e.errors(), "document_id": document_id}
+        return response_dict
     except Exception as e:
-        logger.error(f"Celery task failed for document_id={document_id}. Error: {e}", exc_info=True, extra={
-                     "document_id": document_id, "task_id": self.request.id})
-        # Implement retry logic if desired
-        # raise self.retry(exc=e, countdown=60, max_retries=3)
-        return {"error": "ProcessingError", "details": str(e), "document_id": document_id}
+        logger.error(f"Celery task failed for document_id={document_id}: {e}", exc_info=True, extra={
+                     "document_id": document_id})
+        # Reraise the exception for Celery to mark the task as failed
+        raise
+
+# src/celery_app.py

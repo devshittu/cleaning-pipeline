@@ -16,12 +16,36 @@ celery:
   result_backend: "redis://redis:6379/0" # Redis as result backend
   task_acks_late: True # Acknowledge task only after it's done
   worker_prefetch_multiplier: 1 # Only fetch one task at a time per worker process
-  worker_concurrency: 4 # Number of worker processes. Adjust based on CPU cores (e.g., 4-8 for Threadripper)
+  worker_concurrency: 1 # Number of worker processes. Adjust based on CPU cores (e.g., 4-8 for Threadripper)
   # For GPU, often 1 process per GPU, but spaCy might benefit from multiple threads within that process.
   # We'll start with processes and refine if needed.
   task_annotations:
     '*':
       rate_limit: '300/m' # Example rate limit: 300 tasks per minute globally
+
+# New storage configuration
+storage:
+  backend: "jsonl" # Default storage backend: jsonl, elasticsearch, or postgresql
+  
+  jsonl:
+    output_path: "/app/data/processed_articles.jsonl" # Default output path for JSONL
+
+  elasticsearch:
+    host: "elasticsearch" # Elasticsearch host (Docker service name or IP)
+    port: 9200
+    scheme: "http"
+    index_name: "news_articles"
+    api_key: null # Placeholder: Use environment variables for production (e.g., ES_API_KEY)
+    # basic_auth: ["user", "password"] # Example for basic auth, prefer API key
+
+  postgresql:
+    host: "postgres" # PostgreSQL host (Docker service name or IP)
+    port: 5432
+    dbname: "newsdb"
+    user: "user" # Placeholder: Use environment variables for production (e.g., PG_USER)
+    password: "password" # Placeholder: Use environment variables for production (e.g., PG_PASSWORD)
+    table_name: "processed_articles"
+
 
 logging:
   version: 1
@@ -49,6 +73,5 @@ logging:
       handlers: [ingestion_file, console]
       level: INFO
       propagate: False
-
 
 # # config/settings.yaml

@@ -1,3 +1,4 @@
+# Dockerfile
 # Stage 1: Build stage - Install dependencies and download models
 FROM python:3.11-slim-bookworm AS base
 
@@ -44,12 +45,10 @@ COPY --from=build ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 COPY src ./src
 COPY config ./config
 COPY entrypoint.sh .
-
 # Copy the new CLI entrypoint script (main_cli.py)
 COPY src/main_cli.py ./src/main_cli.py 
 # Explicitly copy the new file
 COPY run-cli.sh .
-
 # Create cache and log directories and ensure permissions
 RUN mkdir -p /app/.cache/spacy /app/logs /app/data && chmod -R 777 /app/.cache /app/logs /app/data
 
