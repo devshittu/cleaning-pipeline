@@ -28,3 +28,4 @@ echo "Starting Ingestion Service..."
 
 # Execute the main command passed to the script (e.g., `uvicorn ...`)
 exec "$@"
+# entrypoint.sh
