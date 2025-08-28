@@ -74,7 +74,6 @@ def _process_single_article(article_data: Dict[str, Any]) -> Optional[Preprocess
 
         # 3. Output Data Validation and return as dictionary
         response = PreprocessSingleResponse(
-            document_id=document_id,
             version="1.0",
             **processed_data_dict
         )
