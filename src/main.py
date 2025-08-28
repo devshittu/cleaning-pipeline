@@ -18,10 +18,11 @@ from pydantic import ValidationError
 from datetime import date
 import argparse
 
-from src.core.processor import preprocessor
+from src.core.processor import TextPreprocessor
 from src.schemas.data_models import ArticleInput, PreprocessFileResult, PreprocessSingleResponse
 from src.utils.config_manager import ConfigManager
 from src.utils.logger import setup_logging
+from src.storage.backends import StorageBackendFactory
 
 # Import Celery task
 from src.celery_app import preprocess_article_task
@@ -30,6 +31,9 @@ from src.celery_app import preprocess_article_task
 settings = ConfigManager.get_settings()
 setup_logging()
 logger = logging.getLogger("ingestion_service")
+
+# Instantiate TextPreprocessor for use in processing
+preprocessor = TextPreprocessor()
 
 # Debug: Log initialization of this module.
 logger.debug("src/main.py module loaded. Contains argparse CLI functions.")
@@ -50,34 +54,40 @@ def _process_single_article(article_data: Dict[str, Any]) -> Optional[Preprocess
         # 2. Core Processing: Process the text and all relevant metadata using the core preprocessor.
         processed_data_dict = preprocessor.preprocess(
             text=input_article.text,
+            document_id=input_article.document_id,
             title=input_article.title,
             excerpt=input_article.excerpt,
             author=input_article.author,
-            reference_date=input_article.publication_date,
-            categories=input_article.categories,
-            tags=input_article.tags,
-            geographical_data=input_article.geographical_data,
-            embargo_date=input_article.embargo_date,
-            media_asset_urls=input_article.media_asset_urls,
+            publication_date=input_article.publication_date,
             revision_date=input_article.revision_date,
             source_url=input_article.source_url,
+            categories=input_article.categories,
+            tags=input_article.tags,
+            media_asset_urls=input_article.media_asset_urls,
+            geographical_data=input_article.geographical_data,
+            embargo_date=input_article.embargo_date,
             sentiment=input_article.sentiment,
             word_count=input_article.word_count,
-            publisher=input_article.publisher
+            publisher=input_article.publisher,
+            additional_metadata=input_article.additional_metadata
         )
 
         # 3. Output Data Validation and return as dictionary
         response = PreprocessSingleResponse(
-            document_id=document_id,
             version="1.0",
             **processed_data_dict
         )
 
-        # 4. Construct the final result object with the unique ID.
+        # 4. Persist to storage backends
+        backends = StorageBackendFactory.get_backends()
+        for backend in backends:
+            backend.save(response)
+
+        # 5. Construct the final result object with the unique ID.
         return PreprocessFileResult(
             document_id=document_id,
             version="1.0",  # Ensure version is set for PreprocessFileResult
-            processed_data=response  # original_text is inside processed_data
+            processed_data=response
         )
 
     except ValidationError as e:
@@ -94,6 +104,7 @@ def preprocess_file(input_path: str, output_path: str, use_celery: bool = False)
     """
     Processes a file containing structured article objects (one per line) in parallel.
     Can optionally submit tasks to Celery for asynchronous processing.
+    Saves results to storage backends in addition to the output file.
     """
     input_file_path = Path(input_path)
     output_file_path = Path(output_path)
@@ -102,6 +113,9 @@ def preprocess_file(input_path: str, output_path: str, use_celery: bool = False)
         print(
             f"Error: Input file not found at {input_file_path}", file=sys.stderr)
         sys.exit(1)
+
+    # Ensure output directory exists
+    output_file_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Starting batch preprocessing of file: {input_file_path}")
     logger.info(
@@ -120,7 +134,7 @@ def preprocess_file(input_path: str, output_path: str, use_celery: bool = False)
             try:
                 article_data = json.loads(line.strip())
                 # Send the article data to Celery task
-                task = preprocess_article_task.delay(article_data)
+                task = preprocess_article_task.delay(json.dumps(article_data))
                 task_results.append(task)
                 logger.debug(f"Submitted article {i+1} as Celery task: {task.id}", extra={
                              "document_id": article_data.get('document_id', 'N/A'), "task_id": task.id})
@@ -136,9 +150,6 @@ def preprocess_file(input_path: str, output_path: str, use_celery: bool = False)
             f"All Celery tasks submitted. Waiting for results to write to {output_file_path}.")
 
         output_lines = []
-        # Retrieve results from Celery. This will block until tasks are done.
-        # For very large batches, you might want to retrieve results in a separate process
-        # or use a more sophisticated result handling mechanism.
         for i, task in enumerate(tqdm(task_results, total=len(task_results), desc="Retrieving Celery Results")):
             if task:
                 try:
@@ -154,6 +165,10 @@ def preprocess_file(input_path: str, output_path: str, use_celery: bool = False)
                                 result_dict)
                         )
                         output_lines.append(processed_result.model_dump_json())
+                        # Save to storage backends
+                        backends = StorageBackendFactory.get_backends()
+                        for backend in backends:
+                            backend.save(processed_result.processed_data)
                     else:
                         logger.error(f"Celery task {task.id} returned an error or no valid result: {result_dict}", extra={
                                      "task_id": task.id})
@@ -164,7 +179,7 @@ def preprocess_file(input_path: str, output_path: str, use_celery: bool = False)
                 logger.warning(
                     f"Skipping a task that failed submission (line {i+1}).")
 
-    else:  # Original synchronous multi-threaded processing
+    else:  # Synchronous multi-threaded processing
         num_threads = settings.ingestion_service.batch_processing_threads
         print(
             f"Using {num_threads} threads for synchronous parallel processing...")
@@ -194,3 +209,5 @@ def preprocess_file(input_path: str, output_path: str, use_celery: bool = False)
     print(f"Processing complete. Results written to: {output_file_path}")
     logger.info(
         f"CLI batch processing finished. Results saved to '{output_file_path}'.")
+
+# src/main.py

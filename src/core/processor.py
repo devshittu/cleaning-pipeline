@@ -48,8 +48,6 @@ class TextPreprocessor:
         self.nlp = None
         self.settings = ConfigManager.get_settings()
         self._load_models()
-        # Note: atexit.register(self.close) has been removed here.
-        # This is now handled by the Celery worker process lifecycle for a more robust solution.
 
     def _load_models(self):
         """
@@ -388,6 +386,11 @@ class TextPreprocessor:
                    categories: Optional[List[str]] = None,
                    tags: Optional[List[str]] = None,
                    media_asset_urls: Optional[List[HttpUrl]] = None,
+                   geographical_data: Optional[Dict[str, Any]] = None,
+                   embargo_date: Optional[date] = None,
+                   sentiment: Optional[str] = None,
+                   word_count: Optional[int] = None,
+                   publisher: Optional[str] = None,
                    additional_metadata: Optional[Dict[str, Any]] = None
                    ) -> Dict[str, Any]:
         """
@@ -412,6 +415,11 @@ class TextPreprocessor:
             categories: A list of categories associated with the article.
             tags: A list of tags associated with the article.
             media_asset_urls: A list of URLs to media assets (images, videos) in the article.
+            geographical_data: Geographical metadata associated with the article.
+            embargo_date: The embargo date of the article, if applicable.
+            sentiment: Sentiment associated with the article.
+            word_count: Word count of the article text.
+            publisher: The publisher of the article.
             additional_metadata: A dictionary for any other arbitrary metadata.
 
         Returns:
@@ -449,6 +457,13 @@ class TextPreprocessor:
         processed_data["cleaned_tags"] = self._clean_field(tags)
         processed_data["cleaned_media_asset_urls"] = self._clean_field(
             media_asset_urls)
+        processed_data["cleaned_geographical_data"] = self._clean_field(
+            geographical_data)
+        processed_data["cleaned_embargo_date"] = self._clean_field(
+            embargo_date)
+        processed_data["cleaned_sentiment"] = self._clean_field(sentiment)
+        processed_data["cleaned_word_count"] = self._clean_field(word_count)
+        processed_data["cleaned_publisher"] = self._clean_field(publisher)
         logger.debug(f"Step 2 complete for document_id={document_id}.")
 
         logger.debug(
@@ -462,20 +477,18 @@ class TextPreprocessor:
 
         logger.debug(
             f"Step 4: Performing dynamic field computation for document_id={document_id}.")
-        original_word_count = additional_metadata.get(
-            'word_count') if additional_metadata else None
-        if original_word_count is None and cleaned_text:
-            word_count = len(cleaned_text.split())
-            processed_data["cleaned_additional_metadata"]["cleaned_word_count"] = word_count
-        elif original_word_count is not None:
-            processed_data["cleaned_additional_metadata"]["cleaned_word_count"] = self._clean_field(
-                original_word_count)
+        if word_count is None and cleaned_text:
+            computed_word_count = len(cleaned_text.split())
+            processed_data["cleaned_word_count"] = computed_word_count
+        elif word_count is not None:
+            processed_data["cleaned_word_count"] = self._clean_field(
+                word_count)
 
         original_reading_time = additional_metadata.get(
             'reading_time') if additional_metadata else None
-        if original_reading_time is None and "cleaned_word_count" in processed_data["cleaned_additional_metadata"]:
-            reading_time = max(1, round(
-                processed_data["cleaned_additional_metadata"]["cleaned_word_count"] / 200))
+        if original_reading_time is None and processed_data.get("cleaned_word_count"):
+            reading_time = max(
+                1, round(processed_data["cleaned_word_count"] / 200))
             processed_data["cleaned_additional_metadata"]["cleaned_reading_time"] = reading_time
         elif original_reading_time is not None:
             processed_data["cleaned_additional_metadata"]["cleaned_reading_time"] = self._clean_field(

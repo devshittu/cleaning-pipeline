@@ -17,7 +17,6 @@ from datetime import date, datetime
 from pathlib import Path
 
 # Conditional imports for database clients - they are only imported when the class is instantiated
-# This avoids hard dependency on all clients if only one backend is used.
 try:
     from elasticsearch import Elasticsearch, helpers as es_helpers
 except ImportError:
@@ -37,8 +36,6 @@ except ImportError:
     logger.debug(
         "psycopg2-binary not installed. PostgreSQLStorageBackend will not be available.")
 
-
-# Updated to use PreprocessSingleResponse directly
 from src.schemas.data_models import PreprocessSingleResponse
 from src.utils.config_manager import ConfigManager, JsonlStorageConfig, ElasticsearchStorageConfig, PostgreSQLStorageConfig
 
@@ -47,7 +44,6 @@ logger = logging.getLogger("ingestion_service")
 
 class StorageBackend(ABC):
     """Abstract Base Class for storage backends."""
-
     @abstractmethod
     def initialize(self):
         """Initializes the storage backend (e.g., establish connection, create directories/tables)."""
@@ -76,7 +72,7 @@ class JSONLStorageBackend(StorageBackend):
     """
 
     def __init__(self, config: JsonlStorageConfig):
-        self.output_directory = Path(config.output_directory)
+        self.output_directory = Path(config.output_path).parent
         self.current_file_path: Optional[Path] = None
         self._file_handle = None
         self._current_date: Optional[date] = None
@@ -126,24 +122,21 @@ class JSONLStorageBackend(StorageBackend):
         Serializes PreprocessSingleResponse to a dictionary, handling Pydantic models
         and datetime/date objects.
         """
-        # model_dump(mode='json') handles datetime/date objects to ISO format strings
-        # and HttpUrl to string, and nested Pydantic models to dicts.
         return data.model_dump(mode='json')
 
     def save(self, data: PreprocessSingleResponse, **kwargs: Any) -> None:
         """Saves a single processed article to the JSONL file."""
         try:
-            self._open_file()  # Ensure the correct daily file is open
+            self._open_file()
             serialized_data = self._serialize_data(data)
             json_line = json.dumps(serialized_data, ensure_ascii=False)
             self._file_handle.write(json_line + '\n')
-            # self._file_handle.flush() # Optional: Force write to disk immediately (can impact performance)
             logger.debug(
                 f"Saved single document {data.document_id} to JSONL file.")
         except Exception as e:
             logger.error(
                 f"Failed to write record {data.document_id} to JSONL file: {e}", exc_info=True)
-            raise  # Re-raise to ensure error is propagated if necessary
+            raise
 
     def save_batch(self, data_list: List[PreprocessSingleResponse], **kwargs: Any) -> None:
         """Saves a batch of processed articles to the JSONL file."""
@@ -158,7 +151,6 @@ class JSONLStorageBackend(StorageBackend):
                 serialized_data = self._serialize_data(data)
                 json_line = json.dumps(serialized_data, ensure_ascii=False)
                 self._file_handle.write(json_line + '\n')
-            # self._file_handle.flush()
             logger.info(
                 f"Saved batch of {len(data_list)} documents to JSONL file.")
         except Exception as e:
@@ -201,20 +193,16 @@ class ElasticsearchStorageBackend(StorageBackend):
 
     def initialize(self):
         """Initializes the Elasticsearch client and ensures the index exists."""
-        if self.es:  # Already initialized
+        if self.es:
             return
 
         try:
-            # Build connection parameters from config
             connection_params = {
                 "hosts": [{"host": self.config.host, "port": self.config.port, "scheme": self.config.scheme}]
             }
             if self.config.api_key:
                 connection_params["api_key"] = self.config.api_key
-            # Add other potential connection_params from config (e.g., basic_auth, cloud_id)
-
             self.es = Elasticsearch(**connection_params)
-            # Verify connection
             if not self.es.ping():
                 raise ConnectionError("Could not connect to Elasticsearch.")
             logger.info("Successfully connected to Elasticsearch.")
@@ -222,8 +210,8 @@ class ElasticsearchStorageBackend(StorageBackend):
         except Exception as e:
             logger.critical(
                 f"Failed to initialize Elasticsearch connection or ensure index '{self.index_name}': {e}", exc_info=True)
-            self.es = None  # Ensure ES client is None if initialization fails
-            raise  # Re-raise to indicate critical failure
+            self.es = None
+            raise
 
     def _ensure_index(self):
         """Ensures the Elasticsearch index exists."""
@@ -251,8 +239,6 @@ class ElasticsearchStorageBackend(StorageBackend):
         Converts Pydantic model to a dictionary suitable for ES,
         handling dates and HttpUrls for JSON serialization.
         """
-        # model_dump(mode='json') is the preferred way to convert Pydantic models
-        # to JSON-compatible dictionaries, handling complex types automatically.
         doc = data.model_dump(mode='json')
         return doc
 
@@ -313,13 +299,10 @@ class ElasticsearchStorageBackend(StorageBackend):
 
     def close(self):
         """Closes the Elasticsearch client connection."""
-        # The Python Elasticsearch client typically manages connections internally
-        # and doesn't require explicit `close()` for HTTP connections like `psycopg2`.
-        # However, it's good practice to have this method for consistency across backends.
         if self.es:
             logger.debug(
                 "Elasticsearch client does not require explicit close for HTTP connections.")
-            self.es = None  # Clear the reference
+            self.es = None
 
 
 class PostgreSQLStorageBackend(StorageBackend):
@@ -350,7 +333,7 @@ class PostgreSQLStorageBackend(StorageBackend):
         """Establishes and returns a new PostgreSQL connection."""
         try:
             conn = psycopg2.connect(**self.conn_params)
-            conn.autocommit = False  # Manage transactions explicitly
+            conn.autocommit = False
             logger.debug("New PostgreSQL connection established.")
             return conn
         except Exception as e:
@@ -363,20 +346,15 @@ class PostgreSQLStorageBackend(StorageBackend):
         Connects to the database and ensures the table exists.
         Handles database creation if it doesn't exist, by connecting to default 'postgres' db.
         """
-        # First, try to connect to 'postgres' database to create the target db if it doesn't exist
         temp_conn_params = self.conn_params.copy()
-        # Temporarily remove target db name
         temp_db_name = temp_conn_params.pop("dbname")
-        # Connect to default postgres db
         temp_conn_params["dbname"] = "postgres"
 
         temp_conn = None
         try:
             temp_conn = psycopg2.connect(**temp_conn_params)
-            # Required for CREATE DATABASE
             temp_conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             cur = temp_conn.cursor()
-            # Check if the target database exists
             cur.execute(pg_sql.SQL(
                 "SELECT 1 FROM pg_database WHERE datname = %s;"), [temp_db_name])
             if cur.fetchone() is None:
@@ -394,7 +372,6 @@ class PostgreSQLStorageBackend(StorageBackend):
             if temp_conn:
                 temp_conn.close()
 
-        # Now connect to the actual database and create the table
         try:
             self._connection = self._get_connection()
             self._create_table_if_not_exists()
@@ -402,7 +379,7 @@ class PostgreSQLStorageBackend(StorageBackend):
         except Exception as e:
             logger.critical(
                 f"Failed to initialize PostgreSQL backend: {e}", exc_info=True)
-            self.close()  # Ensure any partial connection is closed
+            self.close()
             raise
 
     def _create_table_if_not_exists(self):
@@ -414,8 +391,6 @@ class PostgreSQLStorageBackend(StorageBackend):
         cur = None
         try:
             cur = self._connection.cursor()
-            # Define schema for processed articles. Adjust types as needed.
-            # Using JSONB for nested Pydantic models (entities, additional_metadata, etc.)
             create_table_query = pg_sql.SQL("""
             CREATE TABLE IF NOT EXISTS {} (
                 document_id VARCHAR(255) PRIMARY KEY,
@@ -425,15 +400,20 @@ class PostgreSQLStorageBackend(StorageBackend):
                 cleaned_title TEXT,
                 cleaned_excerpt TEXT,
                 cleaned_author TEXT,
-                temporal_metadata DATE,
-                entities JSONB,
-                language VARCHAR(10),
+                cleaned_publication_date DATE,
+                cleaned_revision_date DATE,
+                cleaned_source_url TEXT,
                 cleaned_categories JSONB,
                 cleaned_tags JSONB,
+                cleaned_media_asset_urls JSONB,
                 cleaned_geographical_data JSONB,
                 cleaned_embargo_date DATE,
-                cleaned_media_asset_urls JSONB,
-                additional_metadata JSONB,
+                cleaned_sentiment TEXT,
+                cleaned_word_count INTEGER,
+                cleaned_publisher TEXT,
+                temporal_metadata DATE,
+                entities JSONB,
+                cleaned_additional_metadata JSONB,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
             """).format(pg_sql.Identifier(self.table_name))
@@ -456,10 +436,6 @@ class PostgreSQLStorageBackend(StorageBackend):
         Prepares a single PreprocessSingleResponse for SQL insertion.
         Converts Pydantic models/types to suitable SQL types.
         """
-        # Pydantic's .model_dump(mode='json') handles datetime/date serialization to ISO format strings,
-        # HttpUrl to string, and nested Pydantic models to dicts (which are then JSON-serialized for JSONB columns).
-
-        # Convert temporal_metadata string (YYYY-MM-DD) to date object if it's not None, for DATE type in PG
         temporal_metadata_date = None
         if data.temporal_metadata:
             try:
@@ -469,9 +445,6 @@ class PostgreSQLStorageBackend(StorageBackend):
                 logger.warning(
                     f"Invalid temporal_metadata date format for document {data.document_id}: {data.temporal_metadata}. Storing as NULL.")
 
-        # Convert embargo_date from date object to standard date for psycopg2
-        cleaned_embargo_date = data.cleaned_embargo_date
-
         return {
             "document_id": data.document_id,
             "version": data.version,
@@ -480,17 +453,20 @@ class PostgreSQLStorageBackend(StorageBackend):
             "cleaned_title": data.cleaned_title,
             "cleaned_excerpt": data.cleaned_excerpt,
             "cleaned_author": data.cleaned_author,
-            "temporal_metadata": temporal_metadata_date,
-            # Convert list of Entity models to JSON string
-            "entities": json.dumps([entity.model_dump(mode='json') for entity in data.entities]),
-            "language": data.language,
+            "cleaned_publication_date": data.cleaned_publication_date,
+            "cleaned_revision_date": data.cleaned_revision_date,
+            "cleaned_source_url": str(data.cleaned_source_url) if data.cleaned_source_url else None,
             "cleaned_categories": json.dumps(data.cleaned_categories) if data.cleaned_categories is not None else None,
             "cleaned_tags": json.dumps(data.cleaned_tags) if data.cleaned_tags is not None else None,
-            "cleaned_geographical_data": json.dumps(data.cleaned_geographical_data) if data.cleaned_geographical_data is not None else None,
-            "cleaned_embargo_date": cleaned_embargo_date,
-            # Convert HttpUrl to string list then JSON
             "cleaned_media_asset_urls": json.dumps([str(url) for url in data.cleaned_media_asset_urls]) if data.cleaned_media_asset_urls is not None else None,
-            "additional_metadata": json.dumps(data.additional_metadata) if data.additional_metadata is not None else None
+            "cleaned_geographical_data": json.dumps(data.cleaned_geographical_data) if data.cleaned_geographical_data is not None else None,
+            "cleaned_embargo_date": data.cleaned_embargo_date,
+            "cleaned_sentiment": data.cleaned_sentiment,
+            "cleaned_word_count": data.cleaned_word_count,
+            "cleaned_publisher": data.cleaned_publisher,
+            "temporal_metadata": temporal_metadata_date,
+            "entities": json.dumps([entity.model_dump(mode='json') for entity in data.entities]),
+            "cleaned_additional_metadata": json.dumps(data.cleaned_additional_metadata) if data.cleaned_additional_metadata is not None else None
         }
 
     def save(self, data: PreprocessSingleResponse, **kwargs: Any) -> None:
@@ -504,16 +480,10 @@ class PostgreSQLStorageBackend(StorageBackend):
         cur = None
         try:
             cur = self._connection.cursor()
-
-            # Using psycopg2.sql.Identifier for table and column names for safety against SQL injection
-            # Using pg_sql.Literal for values is handled by execute with %s
             columns = pg_sql.SQL(', ').join(
                 map(pg_sql.Identifier, prepared_data.keys()))
             placeholders = pg_sql.SQL(', ').join(
                 pg_sql.Placeholder() * len(prepared_data))
-
-            # Upsert logic: INSERT ... ON CONFLICT (document_id) DO UPDATE SET ...
-            # Exclude document_id from the SET clause as it's the conflict target
             update_columns = pg_sql.SQL(', ').join(
                 pg_sql.SQL('{} = EXCLUDED.{}').format(
                     pg_sql.Identifier(col), pg_sql.Identifier(col))
@@ -557,8 +527,6 @@ class PostgreSQLStorageBackend(StorageBackend):
         cur = None
         try:
             cur = self._connection.cursor()
-
-            # Get column names from the first item to construct the query
             first_data = self._prepare_sql_data(data_list[0])
             columns = pg_sql.SQL(', ').join(
                 map(pg_sql.Identifier, first_data.keys()))
@@ -581,7 +549,6 @@ class PostgreSQLStorageBackend(StorageBackend):
 
             batch_values = [tuple(self._prepare_sql_data(
                 data).values()) for data in data_list]
-
             cur.executemany(insert_query, batch_values)
             self._connection.commit()
             logger.info(
@@ -637,10 +604,8 @@ class StorageBackendFactory:
         settings = ConfigManager.get_settings()
         storage_config = settings.storage
 
-        # Determine which backends to use for this call
         backends_to_use = []
         if requested_backends:
-            # If specific backends are requested, use them if they are also enabled in settings
             for backend_name in requested_backends:
                 if backend_name in storage_config.enabled_backends:
                     backends_to_use.append(backend_name)
@@ -648,11 +613,9 @@ class StorageBackendFactory:
                     logger.warning(
                         f"Requested backend '{backend_name}' is not enabled in settings. Skipping.")
         else:
-            # If no specific backends requested, use all enabled backends from settings
             backends_to_use = storage_config.enabled_backends
 
         if not backends_to_use:
-            # Fallback to JSONL if no backends explicitly enabled or requested
             logger.info(
                 "No storage backends enabled or requested. Defaulting to 'jsonl'.")
             backends_to_use = ["jsonl"]
@@ -663,7 +626,6 @@ class StorageBackendFactory:
             backend_name_lower = backend_name.lower()
 
             if backend_name_lower not in cls._initialized_backends:
-                # Backend not yet initialized, create and initialize it
                 try:
                     if backend_name_lower == "jsonl":
                         if not storage_config.jsonl:
@@ -687,7 +649,7 @@ class StorageBackendFactory:
                         raise ValueError(
                             f"Unsupported or unconfigured storage backend type: '{backend_name}'.")
 
-                    backend.initialize()  # Initialize connection/resources
+                    backend.initialize()
                     cls._initialized_backends[backend_name_lower] = backend
                     logger.info(
                         f"Storage backend '{backend_name}' successfully initialized.")
@@ -696,13 +658,10 @@ class StorageBackendFactory:
                 except (ValueError, ImportError, ConnectionError) as e:
                     logger.critical(
                         f"Failed to initialize storage backend '{backend_name}': {e}. This backend will be skipped.", exc_info=True)
-                    # Do not re-raise a critical error here, allow other backends to proceed.
-                    # The factory should return whatever it *could* initialize.
                 except Exception as e:
                     logger.critical(
                         f"An unexpected error occurred during initialization of backend '{backend_name}': {e}. Skipping.", exc_info=True)
             else:
-                # Backend already initialized, reuse it
                 backend = cls._initialized_backends[backend_name_lower]
                 active_backends.append(backend)
                 logger.debug(
@@ -714,7 +673,6 @@ class StorageBackendFactory:
     def close_all_backends(cls):
         """Closes all initialized storage backend connections/resources."""
         logger.info("Attempting to close all initialized storage backends.")
-        # Iterate over a copy
         for name, backend in list(cls._initialized_backends.items()):
             try:
                 backend.close()
@@ -723,9 +681,9 @@ class StorageBackendFactory:
                 logger.error(
                     f"Error closing storage backend '{name}': {e}", exc_info=True)
             finally:
-                # Remove from tracking dictionary
                 del cls._initialized_backends[name]
 
 
-# Ensure all backends are closed gracefully on program exit
 atexit.register(StorageBackendFactory.close_all_backends)
+
+# src/storage/backends.py
