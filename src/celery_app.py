@@ -51,10 +51,11 @@ def initialize_preprocessor(**kwargs):
 
 
 @celery_app.task(name="preprocess_article", bind=True)
-def preprocess_article_task(self, article_data_json: str) -> Dict[str, Any]:
+def preprocess_article_task(self, article_data_json: str, persist_to_backends: str = None) -> Dict[str, Any]:
     """
     Celery task to preprocess a single article.
     It receives the article data as a JSON string to ensure proper serialization.
+    Optionally accepts a comma-separated list of storage backends to persist the processed result.
     """
     global preprocessor
     if preprocessor is None:
@@ -121,8 +122,9 @@ def preprocess_article_task(self, article_data_json: str) -> Dict[str, Any]:
                 "cleaned_additional_metadata")
         )
 
-        # Persist to storage backends after successful processing
-        backends = StorageBackendFactory.get_backends()
+        # Persist to specified storage backends or all configured backends if none specified
+        backends = StorageBackendFactory.get_backends(
+            persist_to_backends.split(',') if persist_to_backends else None)
         for backend in backends:
             backend.save(response)
 
@@ -146,4 +148,3 @@ def preprocess_article_task(self, article_data_json: str) -> Dict[str, Any]:
         raise
 
 # src/celery_app.py
-
