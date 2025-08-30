@@ -5,10 +5,11 @@ Defines the FastAPI application for the Ingestion Microservice,
 exposing RESTful endpoints for preprocessing.
 """
 
+import json
 import logging
 import time
 import uuid
-from fastapi import FastAPI, HTTPException, status, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, status, BackgroundTasks, Request, UploadFile, File
 from pydantic import ValidationError
 from typing import List, Dict, Any
 
@@ -67,7 +68,7 @@ async def health_check():
     )
 
 
-@app.post("/preprocess-single", response_model=PreprocessSingleResponse)
+@app.post("/preprocess", response_model=PreprocessSingleResponse)
 async def preprocess_single_article(request: PreprocessSingleRequest, http_request: Request):
     """
     Accepts a single structured article and returns the processed, standardized output.
@@ -78,7 +79,7 @@ async def preprocess_single_article(request: PreprocessSingleRequest, http_reque
 
     document_id = article.document_id
     logger.info(f"Received request for document_id={document_id}.", extra={
-                "document_id": document_id, "endpoint": "/preprocess-single"})
+                "document_id": document_id, "endpoint": "/preprocess"})
 
     try:
         processed_data = preprocessor.preprocess(
@@ -144,7 +145,7 @@ async def preprocess_single_article(request: PreprocessSingleRequest, http_reque
 
     except ValidationError as e:
         logger.warning(
-            f"Invalid request payload for /preprocess-single: {e.errors()}", extra={"document_id": document_id})
+            f"Invalid request payload for /preprocess: {e.errors()}", extra={"document_id": document_id})
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail=f"Invalid input: {e.errors()}")
     except Exception as e:
@@ -154,8 +155,8 @@ async def preprocess_single_article(request: PreprocessSingleRequest, http_reque
                             detail="Internal server error during preprocessing.")
 
 
-@app.post("/submit-batch-job", status_code=status.HTTP_202_ACCEPTED)
-async def submit_batch_job(request: PreprocessBatchRequest):
+@app.post("/preprocess/batch", status_code=status.HTTP_202_ACCEPTED)
+async def submit_batch(request: PreprocessBatchRequest):
     """
     Accepts a list of structured articles and submits them as a batch job to Celery.
     Returns a list of task IDs for tracking. This endpoint is non-blocking.
@@ -178,7 +179,52 @@ async def submit_batch_job(request: PreprocessBatchRequest):
     return {"message": "Batch processing job submitted to Celery.", "task_ids": task_ids}
 
 
-@app.get("/batch-job-status/{task_id}")
+@app.post("/preprocess/batch-file", status_code=status.HTTP_202_ACCEPTED)
+async def submit_batch_file(file: UploadFile = File(...)):
+    """
+    Accepts a JSONL file upload containing structured articles (one per line) and submits them as a batch job to Celery.
+    Returns a list of task IDs for tracking. This endpoint is non-blocking.
+    Handles validation and skips invalid lines with logging.
+    """
+    try:
+        contents = await file.read()
+        lines = contents.decode('utf-8').splitlines()
+    except Exception as e:
+        logger.error(f"Failed to read uploaded file: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file upload.")
+
+    if not lines:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Uploaded file must contain at least one article.")
+
+    task_ids = []
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue  # Skip empty lines
+        try:
+            article_data = json.loads(line)
+            article_input = ArticleInput.model_validate(article_data)
+            task = preprocess_article_task.delay(json.dumps(article_data))
+            task_ids.append(task.id)
+            logger.debug(f"Submitted article {i+1} from file as Celery task: {task.id}", extra={
+                         "document_id": article_input.document_id, "task_id": task.id})
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"Skipping malformed JSON line in uploaded file (line {i+1}): {e}")
+        except ValidationError as e:
+            logger.warning(
+                f"Invalid article data in uploaded file line {i+1}: {e.errors()}")
+
+    if not task_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="No valid articles found in the uploaded file.")
+
+    return {"message": "Batch file processing job submitted to Celery.", "task_ids": task_ids}
+
+
+@app.get("/preprocess/status/{task_id}")
 async def get_batch_job_status(task_id: str):
     """
     Retrieves the status and result of a Celery task by its ID.
