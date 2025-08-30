@@ -11,6 +11,7 @@ from celery import signals
 from src.core.processor import TextPreprocessor
 from src.schemas.data_models import ArticleInput, PreprocessSingleResponse
 from src.utils.config_manager import ConfigManager
+from src.storage.backends import StorageBackendFactory
 from typing import Dict, Any
 
 settings = ConfigManager.get_settings()
@@ -120,6 +121,11 @@ def preprocess_article_task(self, article_data_json: str) -> Dict[str, Any]:
                 "cleaned_additional_metadata")
         )
 
+        # Persist to storage backends after successful processing
+        backends = StorageBackendFactory.get_backends()
+        for backend in backends:
+            backend.save(response)
+
         logger.info(f"Celery task successfully processed document_id={document_id}.", extra={
                     "document_id": document_id})
 
@@ -140,3 +146,4 @@ def preprocess_article_task(self, article_data_json: str) -> Dict[str, Any]:
         raise
 
 # src/celery_app.py
+
