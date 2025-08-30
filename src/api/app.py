@@ -5,11 +5,11 @@ Defines the FastAPI application for the Ingestion Microservice,
 exposing RESTful endpoints for preprocessing.
 """
 
-import json
 import logging
 import time
 import uuid
-from fastapi import FastAPI, HTTPException, status, BackgroundTasks, Request, UploadFile, File
+import json
+from fastapi import FastAPI, HTTPException, status, BackgroundTasks, Request, UploadFile, File, Form
 from pydantic import ValidationError
 from typing import List, Dict, Any
 
@@ -171,7 +171,8 @@ async def submit_batch(request: PreprocessBatchRequest):
 
     task_ids = []
     for i, article_input in enumerate(articles):
-        task = preprocess_article_task.delay(article_input.model_dump_json())
+        task = preprocess_article_task.delay(
+            article_input.model_dump_json(), None)
         task_ids.append(task.id)
         logger.debug(f"Submitted article {i+1} as Celery task: {task.id}", extra={
                      "document_id": article_input.document_id, "task_id": task.id})
@@ -180,11 +181,12 @@ async def submit_batch(request: PreprocessBatchRequest):
 
 
 @app.post("/preprocess/batch-file", status_code=status.HTTP_202_ACCEPTED)
-async def submit_batch_file(file: UploadFile = File(...)):
+async def submit_batch_file(file: UploadFile = File(...), persist_to_backends: str = Form(None)):
     """
     Accepts a JSONL file upload containing structured articles (one per line) and submits them as a batch job to Celery.
     Returns a list of task IDs for tracking. This endpoint is non-blocking.
     Handles validation and skips invalid lines with logging.
+    Optionally specifies storage backends (e.g., 'jsonl,elasticsearch') for persisting processed results.
     """
     try:
         contents = await file.read()
@@ -206,7 +208,8 @@ async def submit_batch_file(file: UploadFile = File(...)):
         try:
             article_data = json.loads(line)
             article_input = ArticleInput.model_validate(article_data)
-            task = preprocess_article_task.delay(json.dumps(article_data))
+            task = preprocess_article_task.delay(
+                json.dumps(article_data), persist_to_backends)
             task_ids.append(task.id)
             logger.debug(f"Submitted article {i+1} from file as Celery task: {task.id}", extra={
                          "document_id": article_input.document_id, "task_id": task.id})
