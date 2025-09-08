@@ -1,0 +1,20 @@
+services:
+  ingestion-service:
+    volumes:
+      - ./src:/app/src
+    command: uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - LOG_LEVEL=DEBUG
+    develop:
+      watch:
+        - action: sync
+          path: ./src
+          target: /app/src
+        - action: rebuild
+          path: ./requirements.txt
+
+  celery-worker:
+    volumes:
+      - ./src:/app/src
+    environment:
+      - LOG_LEVEL=DEBUG

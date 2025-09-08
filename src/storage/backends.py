@@ -81,15 +81,19 @@ class JSONLStorageBackend(StorageBackend):
 
     def initialize(self):
         """
-        Ensures the output directory exists.
+        Ensures the output directory exists and is writable.
         """
         try:
             self.output_directory.mkdir(parents=True, exist_ok=True)
+            # Verify directory is writable
+            if not os.access(self.output_directory, os.W_OK):
+                raise PermissionError(
+                    f"Output directory {self.output_directory} is not writable.")
             logger.info(
                 f"JSONL storage directory ensured: {self.output_directory}")
         except Exception as e:
             logger.critical(
-                f"Failed to create JSONL output directory {self.output_directory}: {e}")
+                f"Failed to create or verify JSONL output directory {self.output_directory}: {e}")
             raise
 
     def _get_daily_file_path(self) -> Path:
@@ -131,11 +135,13 @@ class JSONLStorageBackend(StorageBackend):
             serialized_data = self._serialize_data(data)
             json_line = json.dumps(serialized_data, ensure_ascii=False)
             self._file_handle.write(json_line + '\n')
+            self._file_handle.flush()  # Ensure data is written to disk
+            os.fsync(self._file_handle.fileno())  # Force disk sync
             logger.debug(
-                f"Saved single document {data.document_id} to JSONL file.")
+                f"Saved single document {data.document_id} to JSONL file: {self.current_file_path}")
         except Exception as e:
             logger.error(
-                f"Failed to write record {data.document_id} to JSONL file: {e}", exc_info=True)
+                f"Failed to write record {data.document_id} to JSONL file {self.current_file_path}: {e}", exc_info=True)
             raise
 
     def save_batch(self, data_list: List[PreprocessSingleResponse], **kwargs: Any) -> None:
@@ -151,17 +157,21 @@ class JSONLStorageBackend(StorageBackend):
                 serialized_data = self._serialize_data(data)
                 json_line = json.dumps(serialized_data, ensure_ascii=False)
                 self._file_handle.write(json_line + '\n')
+            self._file_handle.flush()  # Ensure data is written to disk
+            os.fsync(self._file_handle.fileno())  # Force disk sync
             logger.info(
-                f"Saved batch of {len(data_list)} documents to JSONL file.")
+                f"Saved batch of {len(data_list)} documents to JSONL file: {self.current_file_path}")
         except Exception as e:
             logger.error(
-                f"Failed to save batch to JSONL file: {e}", exc_info=True)
+                f"Failed to save batch to JSONL file {self.current_file_path}: {e}", exc_info=True)
             raise
 
     def close(self):
         """Closes the current file handle if open."""
         if self._file_handle:
             try:
+                self._file_handle.flush()  # Ensure any buffered data is written
+                os.fsync(self._file_handle.fileno())  # Force disk sync
                 self._file_handle.close()
                 logger.info(
                     f"Closed JSONL file handle: {self.current_file_path}")

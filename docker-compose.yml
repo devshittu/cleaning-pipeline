@@ -10,7 +10,7 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ./logs:/app/logs
-      - ./data:/app/data # For CLI batch processing
+      - ./data:/app/data:rw # For CLI batch processing
       - ./.cache:/app/.cache # Persist spaCy model cache
     environment:
       PYTHONUNBUFFERED: "1"
@@ -56,6 +56,7 @@ services:
     # Use --pool=solo or --pool=prefork with concurrency=1 if GPU is used per-process
     # For Threadripper, we can use multiple processes (--concurrency)
     volumes:
+      - ./data:/app/data:rw # Explicitly mark as read-write
       - ./config:/app/config:ro
       - ./logs:/app/logs
       - ./.cache:/app/.cache # Persist spaCy model cache
@@ -105,3 +106,4 @@ volumes:
   redis_data:
   es_data:
   pg_data:
+  data: # Added named volume for persistence
