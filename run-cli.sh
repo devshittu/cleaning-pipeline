@@ -17,3 +17,4 @@ echo "Executing command: python -m src.main_cli $@"
 python -m src.main_cli "$@"
 
 # No need for complex fallback logic; if the above fails, set -e will exit.
+# run-cli.sh

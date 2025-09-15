@@ -8,7 +8,8 @@ exposing RESTful endpoints for preprocessing.
 import logging
 import time
 import uuid
-from fastapi import FastAPI, HTTPException, status, BackgroundTasks, Request
+import json
+from fastapi import FastAPI, HTTPException, status, BackgroundTasks, Request, UploadFile, File, Form
 from pydantic import ValidationError
 from typing import List, Dict, Any
 
@@ -19,9 +20,10 @@ from src.schemas.data_models import (
     PreprocessBatchRequest,
     PreprocessBatchResponse
 )
-from src.core.processor import preprocessor
+from src.core.processor import TextPreprocessor
 from src.utils.config_manager import ConfigManager
 from src.utils.logger import setup_logging
+from src.storage.backends import StorageBackendFactory
 
 # Import Celery app and task
 from src.celery_app import celery_app, preprocess_article_task
@@ -38,21 +40,8 @@ app = FastAPI(
     version="1.0.0"
 )
 
-
-@app.on_event("startup")
-async def startup_event():
-    """Startup event for the Ingestion service."""
-    logger.info("Ingestion Service starting up...")
-    try:
-        # Accessing the preprocessor ensures the model is loaded on startup
-        _ = preprocessor.nlp
-        logger.info("Ingestion Service startup complete. SpaCy model is ready.")
-    except Exception as e:
-        logger.critical(
-            f"Failed to initialize preprocessor model at startup: {e}", exc_info=True)
-        # We raise a critical exception to prevent the service from running if the model isn't loaded.
-        raise RuntimeError(
-            "Could not initialize service. Check logs for model loading errors.")
+# Global TextPreprocessor instance per Uvicorn worker process
+preprocessor = TextPreprocessor()
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)
@@ -62,10 +51,9 @@ async def health_check():
     Returns 200 OK if the service is running and the spaCy model is loaded.
     """
     if preprocessor.nlp is not None:
-        # Also check Celery broker connection for a more complete health check
         try:
             with celery_app.connection_or_acquire() as connection:
-                connection.info()  # Try to get info from broker
+                connection.info()
             broker_connected = True
         except Exception as e:
             logger.error(f"Celery broker connection failed: {e}")
@@ -80,7 +68,7 @@ async def health_check():
     )
 
 
-@app.post("/preprocess-single", response_model=PreprocessSingleResponse)
+@app.post("/preprocess", response_model=PreprocessSingleResponse)
 async def preprocess_single_article(request: PreprocessSingleRequest, http_request: Request):
     """
     Accepts a single structured article and returns the processed, standardized output.
@@ -89,29 +77,67 @@ async def preprocess_single_article(request: PreprocessSingleRequest, http_reque
     article = request.article
     start_time = time.time()
 
-    # Use the document_id from the payload for traceability
     document_id = article.document_id
     logger.info(f"Received request for document_id={document_id}.", extra={
-                "document_id": document_id, "endpoint": "/preprocess-single"})
+                "document_id": document_id, "endpoint": "/preprocess"})
 
     try:
-        # Pass the text and all relevant metadata to the processor
         processed_data = preprocessor.preprocess(
+            document_id=article.document_id,
             text=article.text,
             title=article.title,
             excerpt=article.excerpt,
             author=article.author,
-            reference_date=article.publication_date
+            publication_date=article.publication_date,
+            revision_date=article.revision_date,
+            source_url=article.source_url,
+            categories=article.categories,
+            tags=article.tags,
+            media_asset_urls=article.media_asset_urls,
+            geographical_data=article.geographical_data,
+            embargo_date=article.embargo_date,
+            sentiment=article.sentiment,
+            word_count=article.word_count,
+            publisher=article.publisher,
+            additional_metadata=article.additional_metadata
         )
 
-        # Construct the response model using the input document_id
         response = PreprocessSingleResponse(
             document_id=document_id,
             version="1.0",
-            **processed_data
+            original_text=processed_data.get("original_text", ""),
+            cleaned_text=processed_data.get("cleaned_text", ""),
+            cleaned_title=processed_data.get("cleaned_title"),
+            cleaned_excerpt=processed_data.get("cleaned_excerpt"),
+            cleaned_author=processed_data.get("cleaned_author"),
+            cleaned_publication_date=processed_data.get(
+                "cleaned_publication_date"),
+            cleaned_revision_date=processed_data.get("cleaned_revision_date"),
+            cleaned_source_url=processed_data.get("cleaned_source_url"),
+            cleaned_categories=processed_data.get("cleaned_categories"),
+            cleaned_tags=processed_data.get("cleaned_tags"),
+            cleaned_media_asset_urls=processed_data.get(
+                "cleaned_media_asset_urls"),
+            cleaned_geographical_data=processed_data.get(
+                "cleaned_geographical_data"),
+            cleaned_embargo_date=processed_data.get("cleaned_embargo_date"),
+            cleaned_sentiment=processed_data.get("cleaned_sentiment"),
+            cleaned_word_count=processed_data.get("cleaned_word_count"),
+            cleaned_publisher=processed_data.get("cleaned_publisher"),
+            temporal_metadata=processed_data.get("temporal_metadata"),
+            entities=processed_data.get("entities", []),
+            cleaned_additional_metadata=processed_data.get(
+                "cleaned_additional_metadata")
         )
 
-        duration = (time.time() - start_time) * 1000  # in ms
+        # Persist to requested storage backends if specified
+        persist_to_backends = request.persist_to_backends
+        if persist_to_backends:
+            backends = StorageBackendFactory.get_backends(persist_to_backends)
+            for backend in backends:
+                backend.save(response)
+
+        duration = (time.time() - start_time) * 1000
         logger.info(f"Successfully processed document_id={document_id} in {duration:.2f}ms.", extra={
                     "document_id": document_id, "duration_ms": duration})
 
@@ -119,7 +145,7 @@ async def preprocess_single_article(request: PreprocessSingleRequest, http_reque
 
     except ValidationError as e:
         logger.warning(
-            f"Invalid request payload for /preprocess-single: {e.errors()}", extra={"document_id": document_id})
+            f"Invalid request payload for /preprocess: {e.errors()}", extra={"document_id": document_id})
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail=f"Invalid input: {e.errors()}")
     except Exception as e:
@@ -129,8 +155,8 @@ async def preprocess_single_article(request: PreprocessSingleRequest, http_reque
                             detail="Internal server error during preprocessing.")
 
 
-@app.post("/submit-batch-job", status_code=status.HTTP_202_ACCEPTED)
-async def submit_batch_job(request: PreprocessBatchRequest):
+@app.post("/preprocess/batch", status_code=status.HTTP_202_ACCEPTED)
+async def submit_batch(request: PreprocessBatchRequest):
     """
     Accepts a list of structured articles and submits them as a batch job to Celery.
     Returns a list of task IDs for tracking. This endpoint is non-blocking.
@@ -145,9 +171,8 @@ async def submit_batch_job(request: PreprocessBatchRequest):
 
     task_ids = []
     for i, article_input in enumerate(articles):
-        # Send each article as a separate task to Celery
-        # We send the article_input.model_dump() to ensure it's JSON serializable
-        task = preprocess_article_task.delay(article_input.model_dump())
+        task = preprocess_article_task.delay(
+            article_input.model_dump_json(), None)
         task_ids.append(task.id)
         logger.debug(f"Submitted article {i+1} as Celery task: {task.id}", extra={
                      "document_id": article_input.document_id, "task_id": task.id})
@@ -155,7 +180,54 @@ async def submit_batch_job(request: PreprocessBatchRequest):
     return {"message": "Batch processing job submitted to Celery.", "task_ids": task_ids}
 
 
-@app.get("/batch-job-status/{task_id}")
+@app.post("/preprocess/batch-file", status_code=status.HTTP_202_ACCEPTED)
+async def submit_batch_file(file: UploadFile = File(...), persist_to_backends: str = Form(None)):
+    """
+    Accepts a JSONL file upload containing structured articles (one per line) and submits them as a batch job to Celery.
+    Returns a list of task IDs for tracking. This endpoint is non-blocking.
+    Handles validation and skips invalid lines with logging.
+    Optionally specifies storage backends (e.g., 'jsonl,elasticsearch') for persisting processed results.
+    """
+    try:
+        contents = await file.read()
+        lines = contents.decode('utf-8').splitlines()
+    except Exception as e:
+        logger.error(f"Failed to read uploaded file: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file upload.")
+
+    if not lines:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Uploaded file must contain at least one article.")
+
+    task_ids = []
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue  # Skip empty lines
+        try:
+            article_data = json.loads(line)
+            article_input = ArticleInput.model_validate(article_data)
+            task = preprocess_article_task.delay(
+                json.dumps(article_data), persist_to_backends)
+            task_ids.append(task.id)
+            logger.debug(f"Submitted article {i+1} from file as Celery task: {task.id}", extra={
+                         "document_id": article_input.document_id, "task_id": task.id})
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"Skipping malformed JSON line in uploaded file (line {i+1}): {e}")
+        except ValidationError as e:
+            logger.warning(
+                f"Invalid article data in uploaded file line {i+1}: {e.errors()}")
+
+    if not task_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="No valid articles found in the uploaded file.")
+
+    return {"message": "Batch file processing job submitted to Celery.", "task_ids": task_ids}
+
+
+@app.get("/preprocess/status/{task_id}")
 async def get_batch_job_status(task_id: str):
     """
     Retrieves the status and result of a Celery task by its ID.
@@ -179,20 +251,20 @@ async def get_batch_job_status(task_id: str):
             "task_id": task.id,
             "status": task.state,
             "message": "Task is in progress.",
-            "info": task.info  # Custom progress info if task updates it
+            "info": task.info
         }
     elif task.state == 'SUCCESS':
         response = {
             "task_id": task.id,
             "status": task.state,
-            "result": task.result,  # The actual processed data
+            "result": task.result,
             "message": "Task completed successfully."
         }
     elif task.state == 'FAILURE':
         response = {
             "task_id": task.id,
             "status": task.state,
-            "error": str(task.info),  # Contains the exception or error details
+            "error": str(task.info),
             "message": "Task failed."
         }
     else:
@@ -203,3 +275,5 @@ async def get_batch_job_status(task_id: str):
         }
 
     return response
+
+# api/app.py

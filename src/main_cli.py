@@ -12,7 +12,7 @@ import argparse
 from src.main import preprocess_file
 from src.utils.config_manager import ConfigManager
 from src.utils.logger import setup_logging
-from src.core.processor import preprocessor
+from src.core.processor import TextPreprocessor
 
 # Add src to the Python path if it's not already there.
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -28,15 +28,15 @@ settings = ConfigManager.get_settings()
 setup_logging()
 logger = logging.getLogger("ingestion_service")
 
+# Instantiate TextPreprocessor to ensure spaCy model is loaded
+preprocessor = TextPreprocessor()
+
 
 def main():
     """
     Main function to parse arguments and dispatch to CLI commands.
     """
-    # Ensure the spaCy model is loaded for the CLI to work.
-    # This also triggers the singleton initialization of TextPreprocessor.
-    _ = preprocessor.nlp
-    logger.info("SpaCy model initialized for CLI.")
+    logger.info("TextPreprocessor initialized for CLI, spaCy model loaded.")
 
     parser = argparse.ArgumentParser(
         description="CLI for the Data Ingestion & Preprocessing Microservice."
@@ -75,3 +75,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# src/main_cli.py

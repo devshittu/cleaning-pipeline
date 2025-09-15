@@ -1,15 +1,15 @@
+# src/schemas/data_models.py
+# src/schemas/data_models.py
 """
 schemas/data_models.py
 
 Defines Pydantic models for API request and response payloads,
-ensuring data validation and clear documentation.
+ensuring data validation and clear documentation for the news aggregation platform.
 """
 
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, Field, HttpUrl
-import uuid
 from datetime import date
-from enum import Enum
 
 # --- Common Models ---
 
@@ -36,8 +36,9 @@ class Entity(BaseModel):
 
 class ArticleInput(BaseModel):
     """
-    A comprehensive model for an input article or block of text, designed
-    for robustness and traceability.
+    A streamlined model for an input article or block of text, designed
+    for robustness and traceability, with core fields at the top-level
+    and flexible additional metadata.
     """
     document_id: str = Field(
         ..., description="A unique identifier for the document, provided by the upstream service for traceability.")
@@ -53,16 +54,34 @@ class ArticleInput(BaseModel):
         None, description="The last revision date of the article.")
     source_url: Optional[HttpUrl] = Field(
         None, description="The URL from which the article was retrieved.")
-    # Add any other fields here in the future without breaking the API contract.
-
-# --- Ingestion Service Models ---
-# The single and batch request models now wrap the ArticleInput model.
+    categories: Optional[List[str]] = Field(
+        None, description="A list of categories assigned to the article.")
+    tags: Optional[List[str]] = Field(
+        None, description="A list of tags associated with the article for fine-grained classification.")
+    media_asset_urls: Optional[List[HttpUrl]] = Field(
+        None, description="A list of URLs pointing to media assets (images, videos) associated with the article.")
+    geographical_data: Optional[Dict[str, Any]] = Field(
+        None, description="Geographical metadata associated with the article (e.g., location, coordinates).")
+    embargo_date: Optional[date] = Field(
+        None, description="The embargo date of the article, if applicable.")
+    sentiment: Optional[str] = Field(
+        None, description="Sentiment associated with the article (e.g., positive, negative, neutral).")
+    word_count: Optional[int] = Field(
+        None, description="Word count of the article text.")
+    publisher: Optional[str] = Field(
+        None, description="The publisher of the article.")
+    additional_metadata: Optional[Dict[str, Any]] = Field(
+        None, description="A dictionary containing additional metadata fields. All fields within this dictionary are optional."
+    )
 
 
 class PreprocessSingleRequest(BaseModel):
     """Request model for processing a single text input as a structured article."""
     article: ArticleInput = Field(
         ..., description="The structured input containing the text and its metadata.")
+    persist_to_backends: Optional[List[str]] = Field(
+        None, description="Optional: A list of storage backend names (e.g., ['jsonl', 'postgresql']) to persist the result to. If not provided or empty, persistence is skipped."
+    )
 
 
 class PreprocessSingleResponse(BaseModel):
@@ -73,34 +92,61 @@ class PreprocessSingleResponse(BaseModel):
     document_id: str = Field(
         ..., description="A unique identifier for the processed document, carried from the input payload.")
     version: str = Field("1.0", description="Schema version for this output.")
-    # Keep for single API response
     original_text: str = Field(..., description="The original input text.")
     cleaned_text: str = Field(...,
                               description="The cleaned and normalized text.")
-    # New fields for cleaned metadata
+
+    # Cleaned versions of top-level fields
     cleaned_title: Optional[str] = Field(
         None, description="The cleaned and normalized title of the article.")
     cleaned_excerpt: Optional[str] = Field(
         None, description="The cleaned and normalized excerpt of the article.")
     cleaned_author: Optional[str] = Field(
         None, description="The cleaned and normalized author name.")
-
+    cleaned_publication_date: Optional[date] = Field(
+        None, description="The cleaned and normalized publication date.")
+    cleaned_revision_date: Optional[date] = Field(
+        None, description="The cleaned and normalized revision date.")
+    cleaned_source_url: Optional[HttpUrl] = Field(
+        None, description="The cleaned and normalized URL from which the article was retrieved.")
+    cleaned_categories: Optional[List[str]] = Field(
+        None, description="Cleaned and normalized categories assigned to the article.")
+    cleaned_tags: Optional[List[str]] = Field(
+        None, description="Cleaned and normalized tags associated with the article.")
+    cleaned_media_asset_urls: Optional[List[HttpUrl]] = Field(
+        None, description="Cleaned and normalized URLs pointing to media assets associated with the article.")
+    cleaned_geographical_data: Optional[Dict[str, Any]] = Field(
+        None, description="Cleaned and normalized geographical metadata.")
+    cleaned_embargo_date: Optional[date] = Field(
+        None, description="Cleaned and normalized embargo date.")
+    cleaned_sentiment: Optional[str] = Field(
+        None, description="Cleaned and normalized sentiment.")
+    cleaned_word_count: Optional[int] = Field(
+        None, description="Cleaned or computed word count.")
+    cleaned_publisher: Optional[str] = Field(
+        None, description="Cleaned and normalized publisher name.")
     temporal_metadata: Optional[str] = Field(
-        None, description="The normalized date in ISO 8601 format (YYYY-MM-DD), if found.")
+        None, description="The normalized date in ISO 8601 format (YYYY-MM-DD), if found (derived from text).")
     entities: List[Entity] = Field(
-        default_factory=list, description="A list of tagged entities.")
+        default_factory=list, description="A list of tagged entities from the cleaned text.")
+
+    # Dictionary for all cleaned additional metadata
+    cleaned_additional_metadata: Optional[Dict[str, Any]] = Field(
+        None, description="A dictionary containing cleaned and dynamically computed additional metadata fields."
+    )
 
 
 class PreprocessBatchRequest(BaseModel):
     """Request model for processing a list of structured article inputs (batch)."""
     articles: List[ArticleInput] = Field(
         ..., description="A list of structured article inputs to process in batch.")
+    persist_to_backends: Optional[List[str]] = Field(
+        None, description="Optional: A list of storage backend names (e.g., ['jsonl', 'postgresql']) to persist the result to. If not provided or empty, persistence is skipped."
+    )
 
 
 class PreprocessBatchResponse(BaseModel):
     """Response model for the result of a batch processing job."""
-    # Note: For batch API, typically you'd return either a list of results or a job ID.
-    # The current implementation processes in background and returns an empty list.
     processed_articles: List[PreprocessSingleResponse] = Field(
         ..., description="A list of processed outputs for each article in the batch.")
 
@@ -109,11 +155,10 @@ class PreprocessFileResult(BaseModel):
     """
     Model for a single line in the output JSONL file for batch CLI processing.
     It includes the unique document ID and the full processed data.
-    The 'original_text' is removed from this top-level model to avoid redundancy,
-    as it's already present within 'processed_data'.
     """
     document_id: str = Field(...,
                              description="A unique identifier for the processed document.")
     version: str = Field("1.0", description="Schema version for this output.")
-    # original_text: str # REMOVED: This field is now only inside processed_data to avoid redundancy
     processed_data: PreprocessSingleResponse
+
+# schemas/data_models.py
