@@ -9,23 +9,24 @@ ingestion_service:
   model_name: "en_core_web_trf" # The spaCy model to use for NER. Change if needed.
   model_cache_dir: "/app/.cache/spacy" # Path for spaCy to cache models.
   dateparser_languages: ["en"] # Languages for dateparser to consider.
-  batch_processing_threads: 2 # Number of threads for CLI batch processing (will be less relevant with Celery)
+  batch_processing_threads: 4 # Increased from 2 for better parallelism (Fix #4)
+  enable_typo_correction: True # Enable/disable typo correction in cleaning pipeline (Fix #4)
 
 celery:
   broker_url: "redis://redis:6379/0" # Redis as broker
   result_backend: "redis://redis:6379/0" # Redis as result backend
   task_acks_late: True # Acknowledge task only after it's done
   worker_prefetch_multiplier: 1 # Only fetch one task at a time per worker process
-  worker_concurrency: 1 # Number of worker processes. Adjust based on CPU cores (e.g., 4-8 for Threadripper)
+  worker_concurrency: 4 # Number of worker processes. Adjust based on CPU cores (Threadripper has 12 cores)
   # For GPU, often 1 process per GPU, but spaCy might benefit from multiple threads within that process.
-  # We'll start with processes and refine if needed.
   task_annotations:
     '*':
       rate_limit: '300/m' # Example rate limit: 300 tasks per minute globally
 
-# New storage configuration
+# Storage configuration
 storage:
-  backend: "jsonl" # Default storage backend: jsonl, elasticsearch, or postgresql
+  backend: "jsonl" # Default storage backend for backwards compatibility
+  enabled_backends: ["jsonl"] # List of enabled backends (can be: jsonl, elasticsearch, postgresql)
   
   jsonl:
     output_path: "/app/data/processed_articles.jsonl" # Default output path for JSONL
@@ -74,4 +75,5 @@ logging:
       level: INFO
       propagate: False
 
-# # config/settings.yaml
+
+# config/settings.yaml
