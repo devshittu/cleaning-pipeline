@@ -1,13 +1,9 @@
 """
 src/main_cli.py
 
-This is the dedicated entrypoint script for the CLI application using Click.
-It provides intuitive commands for preprocessing news articles.
+CLI application using Click with NER-protected text cleaning.
 
-FIXES APPLIED:
-- Fix #12: Migrated from argparse to Click for better UX
-- Added rich output formatting and progress indicators
-- Improved error handling and user feedback
+FIXED: test-model command now uses clean_text_with_ner_protection()
 """
 
 import sys
@@ -90,7 +86,27 @@ def cli():
     default=None,
     help='Comma-separated list of storage backends (e.g., "jsonl,postgresql,elasticsearch")'
 )
-def process_command(input_path: str, output_path: str, celery: bool, backends: str):
+@click.option(
+    '--disable-typo-correction',
+    is_flag=True,
+    default=False,
+    help='Disable typo correction for this batch'
+)
+@click.option(
+    '--disable-html-removal',
+    is_flag=True,
+    default=False,
+    help='Disable HTML tag removal'
+)
+@click.option(
+    '--disable-currency-standardization',
+    is_flag=True,
+    default=False,
+    help='Disable currency standardization ($100 → USD 100)'
+)
+def process_command(input_path: str, output_path: str, celery: bool, backends: str,
+                    disable_typo_correction: bool, disable_html_removal: bool,
+                    disable_currency_standardization: bool):
     """
     Process a JSONL file containing news articles.
     
@@ -102,11 +118,20 @@ def process_command(input_path: str, output_path: str, celery: bool, backends: s
         # Process with Celery (asynchronous)
         ingestion-cli process -i data/input.jsonl -o data/output.jsonl --celery
         
-        # Specify storage backends
-        ingestion-cli process -i data/input.jsonl -o data/output.jsonl --backends jsonl,postgresql
+        # Disable typo correction
+        ingestion-cli process -i data/input.jsonl -o data/output.jsonl --disable-typo-correction
     """
     console.print(
         "\n[bold cyan]🚀 Starting Article Processing Pipeline[/bold cyan]\n")
+
+    # Build custom config if any flags set
+    custom_config = {}
+    if disable_typo_correction:
+        custom_config['enable_typo_correction'] = False
+    if disable_html_removal:
+        custom_config['remove_html_tags'] = False
+    if disable_currency_standardization:
+        custom_config['standardize_currency'] = False
 
     # Display configuration
     config_table = Table(title="Configuration",
@@ -124,6 +149,9 @@ def process_command(input_path: str, output_path: str, celery: bool, backends: s
     config_table.add_row(
         "GPU Enabled", "Yes" if settings.general.gpu_enabled else "No")
 
+    if custom_config:
+        config_table.add_row("Custom Config", str(custom_config))
+
     console.print(config_table)
     console.print()
 
@@ -140,7 +168,8 @@ def process_command(input_path: str, output_path: str, celery: bool, backends: s
             preprocess_file(
                 input_path=input_path,
                 output_path=output_path,
-                use_celery=celery
+                use_celery=celery,
+                custom_cleaning_config=custom_config if custom_config else None
             )
 
         console.print(f"\n[bold green]✅ Processing complete![/bold green]")
@@ -272,6 +301,17 @@ def info_command():
     info_table.add_row("Model Cache Dir",
                        settings.ingestion_service.model_cache_dir)
 
+    # Cleaning pipeline
+    pipeline = settings.ingestion_service.cleaning_pipeline
+    info_table.add_row(
+        "Typo Correction", "Enabled" if pipeline.enable_typo_correction else "Disabled")
+    info_table.add_row(
+        "NER Protection", "Enabled" if pipeline.typo_correction.use_ner_entities else "Disabled")
+    info_table.add_row(
+        "HTML Removal", "Enabled" if pipeline.remove_html_tags else "Disabled")
+    info_table.add_row(
+        "Currency Std", "Enabled" if pipeline.standardize_currency else "Disabled")
+
     # Celery
     info_table.add_row("Celery Broker", settings.celery.broker_url)
     info_table.add_row("Worker Concurrency", str(
@@ -293,20 +333,36 @@ def info_command():
     default="This is a test article about artificial intelligence and machine learning.",
     help='Test text to process'
 )
-def test_model_command(text: str):
+@click.option(
+    '--disable-typo-correction',
+    is_flag=True,
+    default=False,
+    help='Disable typo correction for this test'
+)
+def test_model_command(text: str, disable_typo_correction: bool):
     """
-    Test the spaCy model with sample text.
+    Test the spaCy model with sample text using NER-protected cleaning.
     
     \b
     Example:
-        ingestion-cli test-model --text "Your sample text here"
+        ingestion-cli test-model --text "Apple Inc. in San Francisco"
+        ingestion-cli test-model --text "Your text" --disable-typo-correction
     """
     console.print("\n[bold cyan]🧪 Testing SpaCy Model[/bold cyan]\n")
 
     try:
+        # Build custom config if flag set
+        custom_config = None
+        if disable_typo_correction:
+            custom_config = {'enable_typo_correction': False}
+            # Temporarily update preprocessor config
+            from src.utils.text_cleaners import TextCleanerConfig
+            preprocessor.cleaning_config = TextCleanerConfig(custom_config)
+
         with console.status("[bold green]Processing text..."):
-            cleaned_text = preprocessor.clean_text(text)
-            entities = preprocessor.tag_entities(cleaned_text)
+            # FIXED: Use NER-protected cleaning
+            cleaned_text, entities = preprocessor.clean_text_with_ner_protection(
+                text)
 
         console.print(f"[bold]Original Text:[/bold]\n{text}\n")
         console.print(f"[bold]Cleaned Text:[/bold]\n{cleaned_text}\n")
@@ -321,6 +377,11 @@ def test_model_command(text: str):
             entity_table.add_column("Position", style="yellow")
 
             for entity in entities:
+                entity_table.add_column("Entity", style="cyan")
+                entity_table.add_column("Type", style="green")
+                entity_table.add_column("Position", style="yellow")
+
+            for entity in entities:
                 entity_table.add_row(
                     entity.text,
                     entity.type,
@@ -330,6 +391,11 @@ def test_model_command(text: str):
             console.print(entity_table)
         else:
             console.print("[yellow]No entities found[/yellow]")
+
+        # Show config used
+        if disable_typo_correction:
+            console.print(
+                f"\n[dim]Note: Typo correction was disabled for this test[/dim]")
 
         console.print(f"\n[bold green]✅ Model test complete![/bold green]\n")
 
