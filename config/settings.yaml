@@ -9,48 +9,86 @@ ingestion_service:
   model_name: "en_core_web_trf" # The spaCy model to use for NER. Change if needed.
   model_cache_dir: "/app/.cache/spacy" # Path for spaCy to cache models.
   dateparser_languages: ["en"] # Languages for dateparser to consider.
-  batch_processing_threads: 4 # Increased from 2 for better parallelism (Fix #4)
-  enable_typo_correction: True # Enable/disable typo correction in cleaning pipeline (Fix #4)
+  batch_processing_threads: 4 # Number of threads for CLI batch processing
+  
+  # Language detection settings
+  langdetect_confidence_threshold: 0.9 # Minimum confidence for language detection
+  
+  # Text Cleaning Pipeline Configuration
+  # Each cleaning step can be individually enabled/disabled
+  cleaning_pipeline:
+    # HTML and markup cleaning
+    remove_html_tags: true
+    
+    # Whitespace normalization
+    normalize_whitespace: true
+    
+    # Encoding fixes
+    fix_encoding: true # Uses ftfy to fix mojibake and encoding issues
+    
+    # Punctuation normalization
+    normalize_punctuation: true
+    normalize_unicode_dashes: true
+    normalize_smart_quotes: true
+    remove_excessive_punctuation: true # Remove repeated !!!!, ????, etc.
+    add_space_after_punctuation: true
+    
+    # Unit and currency standardization
+    standardize_units: true
+    standardize_currency: true
+    
+    # Typo correction settings
+    enable_typo_correction: true
+    typo_correction:
+      min_word_length: 2 # Don't check words shorter than this
+      max_word_length: 15 # Don't check words longer than this (likely proper nouns)
+      skip_capitalized_words: true # Skip words that start with capital letter (proper nouns)
+      skip_mixed_case: true # Skip words like "iPhone", "McDonald's"
+      use_ner_entities: true # Use spaCy NER to skip entity words (CRITICAL for "San Francisco")
+      confidence_threshold: 0.7 # How confident spell checker must be (0.0-1.0)
+      
+  # Entity Recognition Settings
+  entity_recognition:
+    enabled: true
+    entity_types_to_extract: ["PERSON", "ORG", "GPE", "LOC", "DATE", "TIME", "MONEY", "PERCENT"]
+    # GPE = Geopolitical Entity (countries, cities, states)
+    # LOC = Non-GPE locations (mountains, water bodies)
 
 celery:
-  broker_url: "redis://redis:6379/0" # Redis as broker
-  result_backend: "redis://redis:6379/0" # Redis as result backend
-  task_acks_late: True # Acknowledge task only after it's done
-  worker_prefetch_multiplier: 1 # Only fetch one task at a time per worker process
-  worker_concurrency: 4 # Number of worker processes. Adjust based on CPU cores (Threadripper has 12 cores)
-  # For GPU, often 1 process per GPU, but spaCy might benefit from multiple threads within that process.
+  broker_url: "redis://redis:6379/0"
+  result_backend: "redis://redis:6379/0"
+  task_acks_late: true
+  worker_prefetch_multiplier: 1
+  worker_concurrency: 4
   task_annotations:
     '*':
-      rate_limit: '300/m' # Example rate limit: 300 tasks per minute globally
+      rate_limit: '300/m'
 
-# Storage configuration
 storage:
-  backend: "jsonl" # Default storage backend for backwards compatibility
-  enabled_backends: ["jsonl"] # List of enabled backends (can be: jsonl, elasticsearch, postgresql)
+  backend: "jsonl"
+  enabled_backends: ["jsonl"]
   
   jsonl:
-    output_path: "/app/data/processed_articles.jsonl" # Default output path for JSONL
+    output_path: "/app/data/processed_articles.jsonl"
 
   elasticsearch:
-    host: "elasticsearch" # Elasticsearch host (Docker service name or IP)
+    host: "elasticsearch"
     port: 9200
     scheme: "http"
     index_name: "news_articles"
-    api_key: null # Placeholder: Use environment variables for production (e.g., ES_API_KEY)
-    # basic_auth: ["user", "password"] # Example for basic auth, prefer API key
+    api_key: null
 
   postgresql:
-    host: "postgres" # PostgreSQL host (Docker service name or IP)
+    host: "postgres"
     port: 5432
     dbname: "newsdb"
-    user: "user" # Placeholder: Use environment variables for production (e.g., PG_USER)
-    password: "password" # Placeholder: Use environment variables for production (e.g., PG_PASSWORD)
+    user: "user"
+    password: "password"
     table_name: "processed_articles"
-
 
 logging:
   version: 1
-  disable_existing_loggers: False
+  disable_existing_loggers: false
   formatters:
     json:
       class: pythonjsonlogger.jsonlogger.JsonFormatter
@@ -64,7 +102,7 @@ logging:
       class: logging.handlers.RotatingFileHandler
       formatter: json
       filename: /app/logs/ingestion_service.jsonl
-      maxBytes: 10485760 # 10 MB
+      maxBytes: 10485760
       backupCount: 5
   root:
     handlers: [console]
@@ -73,7 +111,6 @@ logging:
     ingestion_service:
       handlers: [ingestion_file, console]
       level: INFO
-      propagate: False
-
+      propagate: false
 
 # config/settings.yaml
