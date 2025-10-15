@@ -206,6 +206,12 @@ async def preprocess_single_article(
     )
 
     try:
+
+        # Extract custom cleaning config if provided
+        custom_config = None
+        if request.cleaning_config:
+            custom_config = request.cleaning_config.model_dump(exclude_none=True)
+
         processed_data = preprocessor.preprocess(
             document_id=article.document_id,
             text=article.text,
@@ -223,7 +229,8 @@ async def preprocess_single_article(
             sentiment=article.sentiment,
             word_count=article.word_count,
             publisher=article.publisher,
-            additional_metadata=article.additional_metadata
+            additional_metadata=article.additional_metadata,
+            custom_cleaning_config=custom_config  # ADD THIS LINE
         )
 
         response = PreprocessSingleResponse(
