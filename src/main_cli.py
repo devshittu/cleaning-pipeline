@@ -377,11 +377,6 @@ def test_model_command(text: str, disable_typo_correction: bool):
             entity_table.add_column("Position", style="yellow")
 
             for entity in entities:
-                entity_table.add_column("Entity", style="cyan")
-                entity_table.add_column("Type", style="green")
-                entity_table.add_column("Position", style="yellow")
-
-            for entity in entities:
                 entity_table.add_row(
                     entity.text,
                     entity.type,
