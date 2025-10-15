@@ -28,7 +28,8 @@ WORKDIR /app
 
 # Copy only requirements to leverage Docker cache
 COPY requirements.txt .
-RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
+RUN pip install --no-cache-dir --disable-pip-version-check --upgrade pip && \
+    pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
 
 # Pre-install the spaCy model to avoid runtime downloads
 RUN python -m spacy download en_core_web_trf
@@ -49,8 +50,10 @@ COPY entrypoint.sh .
 COPY src/main_cli.py ./src/main_cli.py 
 # Explicitly copy the new file
 COPY run-cli.sh .
-# Create cache and log directories and ensure permissions
-RUN mkdir -p /app/.cache/spacy /app/logs /app/data && chmod -R 777 /app/.cache /app/logs /app/data
+
+# Create cache, log, and data directories and ensure permissions
+RUN mkdir -p /app/.cache/spacy /app/logs /app/data /app/monitoring && \
+    chmod -R 777 /app/.cache /app/logs /app/data
 
 # Make the entrypoint and CLI scripts executable
 RUN chmod +x entrypoint.sh run-cli.sh
@@ -66,3 +69,6 @@ ENTRYPOINT ["./entrypoint.sh"]
 
 # Default command to run the FastAPI application
 CMD ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+# Dockerfile

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, HttpUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import yaml
 import os
+import sys
 
 
 class GeneralSettings(BaseModel):
@@ -19,6 +20,48 @@ class GeneralSettings(BaseModel):
         "INFO", description="Set to INFO for production readiness, DEBUG for development.")
     gpu_enabled: bool = Field(
         False, description="Set to True to leverage GPU (e.g., RTX A4000).")
+
+
+class TypoCorrectionSettings(BaseModel):
+    """Settings for typo correction behavior."""
+    min_word_length: int = Field(
+        3, description="Minimum word length to check for typos.")
+    max_word_length: int = Field(
+        15, description="Maximum word length to check (longer words likely proper nouns).")
+    skip_capitalized_words: bool = Field(
+        True, description="Skip words that start with a capital letter.")
+    skip_mixed_case: bool = Field(
+        True, description="Skip words with mixed case like 'iPhone'.")
+    use_ner_entities: bool = Field(
+        True, description="Use NER to skip entity words (CRITICAL for proper nouns).")
+    confidence_threshold: float = Field(
+        0.7, description="Spell checker confidence threshold (0.0-1.0).")
+
+
+class CleaningPipelineSettings(BaseModel):
+    """Settings for text cleaning pipeline steps."""
+    remove_html_tags: bool = Field(True, description="Remove HTML tags.")
+    normalize_whitespace: bool = Field(True, description="Normalize whitespace.")
+    fix_encoding: bool = Field(True, description="Fix encoding issues with ftfy.")
+    normalize_punctuation: bool = Field(True, description="Normalize punctuation.")
+    normalize_unicode_dashes: bool = Field(True, description="Convert unicode dashes to ASCII.")
+    normalize_smart_quotes: bool = Field(True, description="Convert smart quotes to straight quotes.")
+    remove_excessive_punctuation: bool = Field(True, description="Remove repeated punctuation.")
+    add_space_after_punctuation: bool = Field(True, description="Ensure space after punctuation.")
+    standardize_units: bool = Field(True, description="Standardize unit representations.")
+    standardize_currency: bool = Field(True, description="Standardize currency representations.")
+    enable_typo_correction: bool = Field(True, description="Enable typo correction.")
+    typo_correction: TypoCorrectionSettings = Field(
+        default_factory=TypoCorrectionSettings,
+        description="Typo correction specific settings.")
+
+
+class EntityRecognitionSettings(BaseModel):
+    """Settings for named entity recognition."""
+    enabled: bool = Field(True, description="Enable entity recognition.")
+    entity_types_to_extract: List[str] = Field(
+        ["PERSON", "ORG", "GPE", "LOC", "DATE", "TIME", "MONEY", "PERCENT"],
+        description="Entity types to extract from text.")
 
 
 class IngestionServiceSettings(BaseModel):
@@ -31,15 +74,21 @@ class IngestionServiceSettings(BaseModel):
     dateparser_languages: List[str] = Field(
         ["en"], description="Languages for dateparser to consider.")
     batch_processing_threads: int = Field(
-        2, description="Number of threads for CLI batch processing.")
-
-    # New setting for language detection confidence threshold
+        4, description="Number of threads for CLI batch processing.")
     langdetect_confidence_threshold: float = Field(
         0.9, description="Minimum confidence for language detection.")
+    
+    # New nested settings
+    cleaning_pipeline: CleaningPipelineSettings = Field(
+        default_factory=CleaningPipelineSettings,
+        description="Text cleaning pipeline configuration.")
+    entity_recognition: EntityRecognitionSettings = Field(
+        default_factory=EntityRecognitionSettings,
+        description="Entity recognition configuration.")
 
     model_config = SettingsConfigDict(
         arbitrary_types_allowed=True,
-        protected_namespaces=()  # Suppress model_ namespace warnings
+        protected_namespaces=()
     )
 
 
@@ -64,15 +113,10 @@ class CelerySettings(BaseModel):
     )
 
 
-# NEW: Specific configurations for each storage backend
 class JsonlStorageConfig(BaseModel):
     """Configuration for JSONL file storage."""
-    # output_directory: str = Field(
-    #     "./data/processed_output", description="Directory where JSONL files will be stored. Relative to project root."
-    # )
     output_path: str = Field("/app/data/processed_articles.jsonl",
                              description="Default output path for JSONL.")
-
 
 
 class ElasticsearchStorageConfig(BaseModel):
@@ -86,7 +130,6 @@ class ElasticsearchStorageConfig(BaseModel):
         "news_articles", description="Name of the Elasticsearch index.")
     api_key: Optional[str] = Field(
         None, description="Elasticsearch API key for authentication.")
-    # Add other ES relevant fields like `cloud_id`, `basic_auth` etc. as needed
 
 
 class PostgreSQLStorageConfig(BaseModel):
@@ -103,20 +146,14 @@ class PostgreSQLStorageConfig(BaseModel):
 
 class StorageSettings(BaseModel):
     """Overall settings for data storage backends."""
-    # List of enabled backends that can be used. If empty, JSONL is the default.
     enabled_backends: List[str] = Field(
-        ["jsonl"], description="List of storage backend names (e.g., ['jsonl', 'postgresql', 'elasticsearch']) that are enabled for use. If empty, 'jsonl' is used as the default."
-    )
-    # Optional configurations for each backend type
+        ["jsonl"], description="List of storage backend names.")
     jsonl: Optional[JsonlStorageConfig] = Field(
-        None, description="JSONL storage specific configuration."
-    )
+        None, description="JSONL storage specific configuration.")
     elasticsearch: Optional[ElasticsearchStorageConfig] = Field(
-        None, description="Elasticsearch storage specific configuration."
-    )
+        None, description="Elasticsearch storage specific configuration.")
     postgresql: Optional[PostgreSQLStorageConfig] = Field(
-        None, description="PostgreSQL storage specific configuration."
-    )
+        None, description="PostgreSQL storage specific configuration.")
 
     model_config = SettingsConfigDict(
         arbitrary_types_allowed=True,
@@ -127,11 +164,11 @@ class StorageSettings(BaseModel):
 class FormatterConfig(BaseModel):
     """Logging formatter configuration."""
     class_: str = Field(..., alias="class",
-                        description="The class path for the formatter (e.g., pythonjsonlogger.jsonlogger.JsonFormatter).")
+                        description="The class path for the formatter.")
     format: str = Field(..., description="The log format string.")
 
     model_config = SettingsConfigDict(
-        extra='allow',  # Allow additional fields like format
+        extra='allow',
         arbitrary_types_allowed=True,
         protected_namespaces=()
     )
@@ -140,11 +177,11 @@ class FormatterConfig(BaseModel):
 class HandlerConfig(BaseModel):
     """Logging handler configuration."""
     class_: str = Field(..., alias="class",
-                        description="The class path for the handler (e.g., logging.StreamHandler).")
+                        description="The class path for the handler.")
     formatter: Optional[str] = Field(
         None, description="The formatter name to use for this handler.")
     stream: Optional[str] = Field(
-        None, description="The stream for StreamHandler (e.g., ext://sys.stdout).")
+        None, description="The stream for StreamHandler.")
     filename: Optional[str] = Field(
         None, description="The log file path for file-based handlers.")
     maxBytes: Optional[int] = Field(
@@ -153,7 +190,7 @@ class HandlerConfig(BaseModel):
         None, description="Number of backup files for RotatingFileHandler.")
 
     model_config = SettingsConfigDict(
-        extra='allow',  # Allow additional fields
+        extra='allow',
         arbitrary_types_allowed=True,
         protected_namespaces=()
     )
@@ -179,7 +216,7 @@ class Settings(BaseSettings):
     general: GeneralSettings
     ingestion_service: IngestionServiceSettings
     celery: CelerySettings
-    storage: StorageSettings  # Updated to the new StorageSettings
+    storage: StorageSettings
     logging: LoggingConfig
 
     model_config = SettingsConfigDict(
@@ -212,8 +249,6 @@ class ConfigManager:
             try:
                 ConfigManager._settings = Settings.model_validate(config_data)
             except Exception as e:
-                # Log a critical error if settings validation fails
-                # Using a basic print/logger.error here as full logging might not be set up yet
                 print(f"CRITICAL ERROR: Failed to validate settings from {config_path}. "
                       f"Please check your settings.yaml file against the schema. Error: {e}", file=sys.stderr)
                 raise RuntimeError(
@@ -223,25 +258,15 @@ class ConfigManager:
 
 
 if __name__ == '__main__':
-    # Example usage for testing the ConfigManager
-    import sys
     try:
         settings = ConfigManager.get_settings()
         print("--- Loaded Settings ---")
         print(f"Log Level: {settings.general.log_level}")
         print(f"GPU Enabled: {settings.general.gpu_enabled}")
-        print(f"Ingestion Port: {settings.ingestion_service.port}")
-        print(f"spaCy Model: {settings.ingestion_service.model_name}")
-        print(f"Celery Broker URL: {settings.celery.broker_url}")
-        print(f"Enabled Storage Backends: {settings.storage.enabled_backends}")
-        if settings.storage.jsonl:
-            print(
-                f"JSONL Output Path: {settings.storage.jsonl.output_path}")
-        if settings.storage.elasticsearch:
-            print(f"ES Host: {settings.storage.elasticsearch.host}")
-        if settings.storage.postgresql:
-            print(f"PG Host: {settings.storage.postgresql.host}")
-        print(
-            f"Log Handler: {settings.logging.handlers['ingestion_file'].filename}")
+        print(f"Typo Correction: {settings.ingestion_service.cleaning_pipeline.enable_typo_correction}")
+        print(f"Use NER for Typos: {settings.ingestion_service.cleaning_pipeline.typo_correction.use_ner_entities}")
     except Exception as e:
         print(f"Test failed: {e}", file=sys.stderr)
+
+
+# src/utils/config_manager.py

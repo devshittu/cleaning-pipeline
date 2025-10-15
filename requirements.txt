@@ -1,26 +1,50 @@
 # requirements.txt
+# Core FastAPI and ASGI
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
+
+# Data validation and configuration
 pydantic==2.7.1
 pydantic-settings==2.2.1
+
+# NLP and text processing
 spacy==3.8.0
 dateparser==1.2.0
+langdetect==1.0.9
+ftfy==6.2.0
+pyspellchecker==0.8.0
+
+# Logging
 python-json-logger==2.0.7
 PyYAML==6.0.1
-# Celery and Redis dependencies
-celery==5.4.0
-redis==5.0.1 # For Redis broker
 
-# Dependencies for spaCy's transformer model (en_core_web_trf)
-# These are required for the model to work on CPU or GPU
+# Celery and Redis for async task processing
+celery==5.4.0
+redis==5.0.1
+
+# Retry logic and resilience
+tenacity==8.3.0
+
+# CLI enhancements (Fix #12)
+click==8.1.7
+rich==13.7.1
+
+# Database clients
+elasticsearch==8.14.0
+psycopg2-binary==2.9.9
+
+# Deep Learning frameworks for spaCy transformer models
 torch==2.3.0
 transformers==4.41.2
 accelerate==0.30.1
 
+# Monitoring and observability (Fix #7)
+prometheus-client==0.20.0
+prometheus-fastapi-instrumentator==7.0.0
 
+# Testing (keep existing test dependencies)
+pytest==8.2.0
+pytest-asyncio==0.23.6
+pytest-cov==5.0.0
 
-langdetect==1.0.9
-ftfy==6.2.0
-pyspellchecker==0.8.0
-elasticsearch==8.14.0
-psycopg2-binary==2.9.9
+# requirements.txt
