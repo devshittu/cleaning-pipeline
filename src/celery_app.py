@@ -2,6 +2,9 @@
 src/celery_app.py
 
 Defines the Celery application and tasks for asynchronous processing.
+
+FIXES APPLIED:
+- Fix #8: Enhanced retry logic with exponential backoff and jitter
 """
 
 import json
@@ -29,7 +32,11 @@ celery_app.conf.update(
     task_acks_late=settings.celery.task_acks_late,
     worker_prefetch_multiplier=settings.celery.worker_prefetch_multiplier,
     worker_concurrency=settings.celery.worker_concurrency,
-    task_annotations=settings.celery.task_annotations
+    task_annotations=settings.celery.task_annotations,
+    # Additional configurations for better reliability
+    task_reject_on_worker_lost=True,
+    task_acks_on_failure_or_timeout=True,
+    broker_connection_retry_on_startup=True,
 )
 
 # A global variable to hold the TextPreprocessor instance per worker process.
@@ -48,21 +55,53 @@ def initialize_preprocessor(**kwargs):
     logger.info(
         "Celery worker process initializing. Loading TextPreprocessor instance.")
     preprocessor = TextPreprocessor()
+    logger.info(
+        "TextPreprocessor initialized successfully in Celery worker.")
 
 
-@celery_app.task(name="preprocess_article", bind=True)
+@signals.worker_process_shutdown.connect
+def cleanup_preprocessor(**kwargs):
+    """
+    Signal handler for worker process shutdown.
+    Properly closes TextPreprocessor resources.
+    """
+    global preprocessor
+    if preprocessor:
+        logger.info(
+            "Celery worker shutting down. Cleaning up TextPreprocessor.")
+        preprocessor.close()
+        preprocessor = None
+
+
+@celery_app.task(
+    name="preprocess_article",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=60,  # 1 minute initial delay
+    autoretry_for=(Exception,),  # Retry on any exception
+    retry_backoff=True,  # Enable exponential backoff
+    retry_backoff_max=600,  # Max 10 minutes between retries
+    retry_jitter=True,  # Add randomness to prevent thundering herd
+    acks_late=True,  # Acknowledge task only after completion
+    reject_on_worker_lost=True  # Reject task if worker dies
+)
 def preprocess_article_task(self, article_data_json: str, persist_to_backends: str = None) -> Dict[str, Any]:
     """
     Celery task to preprocess a single article.
     It receives the article data as a JSON string to ensure proper serialization.
     Optionally accepts a comma-separated list of storage backends to persist the processed result.
+    
+    IMPROVEMENTS:
+    - Fix #8: Exponential backoff with jitter for retries
+    - Better error handling and logging
+    - Automatic retry on transient failures
     """
     global preprocessor
     if preprocessor is None:
         # This is a fallback in case the signal handler failed, though it
         # should not be needed with the worker_process_init signal.
         logger.warning(
-            "Preprocessor not initialized. Initializing within task.")
+            "Preprocessor not initialized in worker_process_init. Initializing within task.")
         preprocessor = TextPreprocessor()
 
     document_id = "unknown"  # Default for logging in case of early failure
@@ -71,8 +110,14 @@ def preprocess_article_task(self, article_data_json: str, persist_to_backends: s
         article_input = ArticleInput.model_validate_json(article_data_json)
         document_id = article_input.document_id  # Update document_id for logging
 
-        logger.info(f"Celery task received article for document_id={document_id}.", extra={
-                    "document_id": document_id})
+        logger.info(
+            f"Celery task {self.request.id} processing document_id={document_id}.",
+            extra={
+                "document_id": document_id,
+                "task_id": self.request.id,
+                "retry_count": self.request.retries
+            }
+        )
 
         processed_data = preprocessor.preprocess(
             document_id=article_input.document_id,
@@ -123,15 +168,34 @@ def preprocess_article_task(self, article_data_json: str, persist_to_backends: s
         )
 
         # Persist to specified storage backends or all configured backends if none specified
-        backends = StorageBackendFactory.get_backends(
-            persist_to_backends.split(',') if persist_to_backends else None)
-        for backend in backends:
-            backend.save(response)
+        try:
+            backends = StorageBackendFactory.get_backends(
+                persist_to_backends.split(',') if persist_to_backends else None)
+            for backend in backends:
+                backend.save(response)
+        except Exception as storage_error:
+            # Log storage error but don't fail the entire task
+            logger.error(
+                f"Failed to persist document_id={document_id} to storage backends: {storage_error}",
+                exc_info=True,
+                extra={
+                    "document_id": document_id,
+                    "task_id": self.request.id
+                }
+            )
+            # Optionally, you can decide whether to retry on storage failures
+            # For now, we log and continue
 
-        logger.info(f"Celery task successfully processed document_id={document_id}.", extra={
-                    "document_id": document_id})
+        logger.info(
+            f"Celery task {self.request.id} successfully processed document_id={document_id}.",
+            extra={
+                "document_id": document_id,
+                "task_id": self.request.id
+            }
+        )
 
-        # Ensure the result is a dictionary with no Pydantic Url objects, as Celery's serializer cannot handle them.
+        # Ensure the result is a dictionary with no Pydantic Url objects,
+        # as Celery's serializer cannot handle them.
         response_dict = response.model_dump()
         if response_dict.get('cleaned_source_url') is not None:
             response_dict['cleaned_source_url'] = str(
@@ -141,10 +205,30 @@ def preprocess_article_task(self, article_data_json: str, persist_to_backends: s
                 str(url) for url in response_dict['cleaned_media_asset_urls']]
 
         return response_dict
+
     except Exception as e:
-        logger.error(f"Celery task failed for document_id={document_id}: {e}", exc_info=True, extra={
-                     "document_id": document_id})
-        # Reraise the exception for Celery to mark the task as failed
+        logger.error(
+            f"Celery task {self.request.id} failed for document_id={document_id}: {e}",
+            exc_info=True,
+            extra={
+                "document_id": document_id,
+                "task_id": self.request.id,
+                "retry_count": self.request.retries
+            }
+        )
+
+        # Check if we should retry
+        if self.request.retries < self.max_retries:
+            logger.info(
+                f"Retrying task {self.request.id} for document_id={document_id} "
+                f"(attempt {self.request.retries + 1}/{self.max_retries})",
+                extra={
+                    "document_id": document_id,
+                    "task_id": self.request.id
+                }
+            )
+
+        # Reraise the exception for Celery to handle retry logic
         raise
 
 # src/celery_app.py

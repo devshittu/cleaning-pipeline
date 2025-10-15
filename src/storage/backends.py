@@ -5,6 +5,11 @@ src/storage/backends.py
 Defines abstract and concrete storage backend implementations for
 processed articles (JSONL, Elasticsearch, PostgreSQL),
 and a factory to retrieve them based on configuration.
+
+FIXES APPLIED:
+- Fix #2: PostgreSQL connection pooling (5-20 connections)
+- Fix #3: Elasticsearch bulk insert with 500-item batching
+- Fix #6: Retry logic with exponential backoff for all backends
 """
 
 import atexit
@@ -16,30 +21,48 @@ from typing import Dict, Any, List, Optional, Union
 from datetime import date, datetime
 from pathlib import Path
 
+# Tenacity for retry logic
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
+
 # Conditional imports for database clients - they are only imported when the class is instantiated
 try:
     from elasticsearch import Elasticsearch, helpers as es_helpers
 except ImportError:
     Elasticsearch = None
     es_helpers = None
-    logger.debug(
-        "Elasticsearch client not installed. ElasticsearchStorageBackend will not be available.")
 
 try:
     import psycopg2
+    from psycopg2 import pool as psycopg2_pool
     from psycopg2 import sql as pg_sql
     from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 except ImportError:
     psycopg2 = None
+    psycopg2_pool = None
     pg_sql = None
     ISOLATION_LEVEL_AUTOCOMMIT = None
-    logger.debug(
-        "psycopg2-binary not installed. PostgreSQLStorageBackend will not be available.")
 
 from src.schemas.data_models import PreprocessSingleResponse
-from src.utils.config_manager import ConfigManager, JsonlStorageConfig, ElasticsearchStorageConfig, PostgreSQLStorageConfig
+from src.utils.config_manager import (
+    ConfigManager,
+    JsonlStorageConfig,
+    ElasticsearchStorageConfig,
+    PostgreSQLStorageConfig
+)
 
 logger = logging.getLogger("ingestion_service")
+
+# Constants for retry and batching
+MAX_RETRY_ATTEMPTS = 3
+RETRY_MIN_WAIT = 2  # seconds
+RETRY_MAX_WAIT = 10  # seconds
+ES_BATCH_SIZE = 500  # Elasticsearch recommendation
 
 
 class StorageBackend(ABC):
@@ -69,6 +92,10 @@ class JSONLStorageBackend(StorageBackend):
     """
     Storage backend that saves processed articles to a daily-created JSONL (JSON Lines) file.
     Each line in the file is a JSON object.
+    
+    IMPROVEMENTS:
+    - Retry logic with exponential backoff for file write failures
+    - Better error handling and logging
     """
 
     def __init__(self, config: JsonlStorageConfig):
@@ -128,8 +155,19 @@ class JSONLStorageBackend(StorageBackend):
         """
         return data.model_dump(mode='json')
 
+    @retry(
+        stop=stop_after_attempt(MAX_RETRY_ATTEMPTS),
+        wait=wait_exponential(
+            multiplier=1, min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
+        retry=retry_if_exception_type((IOError, OSError)),
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
     def save(self, data: PreprocessSingleResponse, **kwargs: Any) -> None:
-        """Saves a single processed article to the JSONL file."""
+        """
+        Saves a single processed article to the JSONL file.
+        
+        IMPROVEMENT: Retry logic handles transient file system errors.
+        """
         try:
             self._open_file()
             serialized_data = self._serialize_data(data)
@@ -141,11 +179,23 @@ class JSONLStorageBackend(StorageBackend):
                 f"Saved single document {data.document_id} to JSONL file: {self.current_file_path}")
         except Exception as e:
             logger.error(
-                f"Failed to write record {data.document_id} to JSONL file {self.current_file_path}: {e}", exc_info=True)
+                f"Failed to write record {data.document_id} to JSONL file {self.current_file_path}: {e}",
+                exc_info=True)
             raise
 
+    @retry(
+        stop=stop_after_attempt(MAX_RETRY_ATTEMPTS),
+        wait=wait_exponential(
+            multiplier=1, min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
+        retry=retry_if_exception_type((IOError, OSError)),
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
     def save_batch(self, data_list: List[PreprocessSingleResponse], **kwargs: Any) -> None:
-        """Saves a batch of processed articles to the JSONL file."""
+        """
+        Saves a batch of processed articles to the JSONL file.
+        
+        IMPROVEMENT: Retry logic handles transient file system errors.
+        """
         if not data_list:
             logger.debug(
                 "Attempted to save an empty batch to JSONL. Skipping.")
@@ -163,7 +213,8 @@ class JSONLStorageBackend(StorageBackend):
                 f"Saved batch of {len(data_list)} documents to JSONL file: {self.current_file_path}")
         except Exception as e:
             logger.error(
-                f"Failed to save batch to JSONL file {self.current_file_path}: {e}", exc_info=True)
+                f"Failed to save batch to JSONL file {self.current_file_path}: {e}",
+                exc_info=True)
             raise
 
     def close(self):
@@ -177,7 +228,8 @@ class JSONLStorageBackend(StorageBackend):
                     f"Closed JSONL file handle: {self.current_file_path}")
             except Exception as e:
                 logger.error(
-                    f"Error closing JSONL file {self.current_file_path}: {e}", exc_info=True)
+                    f"Error closing JSONL file {self.current_file_path}: {e}",
+                    exc_info=True)
             finally:
                 self._file_handle = None
                 self.current_file_path = None
@@ -188,6 +240,10 @@ class ElasticsearchStorageBackend(StorageBackend):
     """
     Storage backend that saves processed articles to Elasticsearch.
     Requires Elasticsearch client to be installed and connection details.
+    
+    IMPROVEMENTS:
+    - Fix #3: Bulk insert with 500-item batching to prevent OOM
+    - Fix #6: Retry logic with exponential backoff for network failures
     """
 
     def __init__(self, config: ElasticsearchStorageConfig):
@@ -219,7 +275,8 @@ class ElasticsearchStorageBackend(StorageBackend):
             self._ensure_index()
         except Exception as e:
             logger.critical(
-                f"Failed to initialize Elasticsearch connection or ensure index '{self.index_name}': {e}", exc_info=True)
+                f"Failed to initialize Elasticsearch connection or ensure index '{self.index_name}': {e}",
+                exc_info=True)
             self.es = None
             raise
 
@@ -240,7 +297,8 @@ class ElasticsearchStorageBackend(StorageBackend):
                     f"Elasticsearch index '{self.index_name}' already exists.")
         except Exception as e:
             logger.error(
-                f"Failed to check/create Elasticsearch index '{self.index_name}': {e}", exc_info=True)
+                f"Failed to check/create Elasticsearch index '{self.index_name}': {e}",
+                exc_info=True)
             raise
 
     def _prepare_doc(self, data: PreprocessSingleResponse) -> Dict[str, Any]:
@@ -252,8 +310,19 @@ class ElasticsearchStorageBackend(StorageBackend):
         doc = data.model_dump(mode='json')
         return doc
 
+    @retry(
+        stop=stop_after_attempt(MAX_RETRY_ATTEMPTS),
+        wait=wait_exponential(
+            multiplier=1, min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
     def save(self, data: PreprocessSingleResponse, **kwargs: Any) -> None:
-        """Saves a single processed article to Elasticsearch."""
+        """
+        Saves a single processed article to Elasticsearch.
+        
+        IMPROVEMENT: Retry logic handles transient network failures.
+        """
         if not self.es:
             logger.error(
                 f"Elasticsearch client not initialized. Skipping save for document {data.document_id}.")
@@ -267,11 +336,25 @@ class ElasticsearchStorageBackend(StorageBackend):
                 f"Saved document {data.document_id} to Elasticsearch. Response: {response['result']}")
         except Exception as e:
             logger.error(
-                f"Failed to save document {data.document_id} to Elasticsearch: {e}", exc_info=True)
+                f"Failed to save document {data.document_id} to Elasticsearch: {e}",
+                exc_info=True)
             raise
 
+    @retry(
+        stop=stop_after_attempt(MAX_RETRY_ATTEMPTS),
+        wait=wait_exponential(
+            multiplier=1, min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
     def save_batch(self, data_list: List[PreprocessSingleResponse], **kwargs: Any) -> None:
-        """Saves a batch of processed articles to Elasticsearch using bulk API."""
+        """
+        Saves a batch of processed articles to Elasticsearch using bulk API.
+        
+        IMPROVEMENTS:
+        - Fix #3: Batches into 500-item chunks to prevent OOM and ES rejection
+        - Fix #6: Retry logic for network failures
+        """
         if not self.es:
             logger.error(
                 "Elasticsearch client not initialized. Skipping batch save.")
@@ -286,26 +369,40 @@ class ElasticsearchStorageBackend(StorageBackend):
             raise ImportError(
                 "Elasticsearch helpers module is required for bulk operations.")
 
-        actions = [
-            {
-                "_index": self.index_name,
-                "_id": data.document_id,
-                "_source": self._prepare_doc(data)
-            }
-            for data in data_list
-        ]
-        try:
-            success_count, errors = es_helpers.bulk(
-                self.es, actions, stats_only=True)
-            if errors:
-                for error in errors:
-                    logger.error(f"Elasticsearch bulk save error: {error}")
-            logger.info(
-                f"Successfully saved {success_count} of {len(data_list)} documents to Elasticsearch (with {len(errors)} errors).")
-        except Exception as e:
-            logger.error(
-                f"Failed to save batch to Elasticsearch: {e}", exc_info=True)
-            raise
+        # Process in batches of ES_BATCH_SIZE (500)
+        total_success = 0
+        total_errors = []
+
+        for i in range(0, len(data_list), ES_BATCH_SIZE):
+            batch = data_list[i:i+ES_BATCH_SIZE]
+            actions = [
+                {
+                    "_index": self.index_name,
+                    "_id": data.document_id,
+                    "_source": self._prepare_doc(data)
+                }
+                for data in batch
+            ]
+            try:
+                success_count, errors = es_helpers.bulk(
+                    self.es, actions, chunk_size=ES_BATCH_SIZE, stats_only=False)
+                total_success += success_count
+                if errors:
+                    total_errors.extend(errors)
+                    for error in errors:
+                        logger.error(f"Elasticsearch bulk save error: {error}")
+                logger.debug(
+                    f"Processed ES batch {i//ES_BATCH_SIZE + 1}: {success_count} successes, "
+                    f"{len(errors)} errors")
+            except Exception as e:
+                logger.error(
+                    f"Failed to save batch chunk to Elasticsearch (items {i}-{i+len(batch)}): {e}",
+                    exc_info=True)
+                raise
+
+        logger.info(
+            f"Successfully saved {total_success} of {len(data_list)} documents to Elasticsearch "
+            f"(with {len(total_errors)} errors).")
 
     def close(self):
         """Closes the Elasticsearch client connection."""
@@ -319,7 +416,15 @@ class PostgreSQLStorageBackend(StorageBackend):
     """
     Storage backend that saves processed articles to PostgreSQL.
     Requires psycopg2-binary client to be installed.
+    
+    IMPROVEMENTS:
+    - Fix #2: Connection pooling (5-20 connections) for high concurrency
+    - Fix #6: Retry logic with exponential backoff for network failures
     """
+
+    # Class-level connection pool (shared across instances)
+    _connection_pool: Optional[Any] = None
+    _pool_lock = None  # Will be initialized with threading.Lock()
 
     def __init__(self, config: PostgreSQLStorageConfig):
         if psycopg2 is None:
@@ -336,20 +441,55 @@ class PostgreSQLStorageBackend(StorageBackend):
         }
         self.table_name = config.table_name
         self._connection: Optional[psycopg2.extensions.connection] = None
+
+        # Initialize lock for thread-safe pool access
+        if PostgreSQLStorageBackend._pool_lock is None:
+            import threading
+            PostgreSQLStorageBackend._pool_lock = threading.Lock()
+
         logger.info(
-            f"Initialized PostgreSQLStorageBackend for table: {self.table_name} on {config.host}:{config.port}/{config.dbname}")
+            f"Initialized PostgreSQLStorageBackend for table: {self.table_name} on "
+            f"{config.host}:{config.port}/{config.dbname}")
+
+    def _get_or_create_pool(self):
+        """
+        Creates or returns the connection pool.
+        Thread-safe initialization of the class-level pool.
+        """
+        with PostgreSQLStorageBackend._pool_lock:
+            if PostgreSQLStorageBackend._connection_pool is None:
+                try:
+                    PostgreSQLStorageBackend._connection_pool = psycopg2_pool.ThreadedConnectionPool(
+                        minconn=5,
+                        maxconn=20,
+                        **self.conn_params
+                    )
+                    logger.info(
+                        "PostgreSQL connection pool created (5-20 connections)")
+                except Exception as e:
+                    logger.critical(
+                        f"Failed to create PostgreSQL connection pool: {e}", exc_info=True)
+                    raise
+            return PostgreSQLStorageBackend._connection_pool
 
     def _get_connection(self) -> psycopg2.extensions.connection:
-        """Establishes and returns a new PostgreSQL connection."""
+        """Gets a connection from the pool."""
+        pool = self._get_or_create_pool()
         try:
-            conn = psycopg2.connect(**self.conn_params)
+            conn = pool.getconn()
             conn.autocommit = False
-            logger.debug("New PostgreSQL connection established.")
+            logger.debug("Retrieved connection from PostgreSQL pool")
             return conn
         except Exception as e:
             logger.critical(
-                f"Failed to establish PostgreSQL connection: {e}", exc_info=True)
+                f"Failed to get connection from PostgreSQL pool: {e}", exc_info=True)
             raise
+
+    def _return_connection(self, conn: psycopg2.extensions.connection):
+        """Returns a connection to the pool."""
+        if conn and PostgreSQLStorageBackend._connection_pool:
+            PostgreSQLStorageBackend._connection_pool.putconn(conn)
+            logger.debug("Returned connection to PostgreSQL pool")
 
     def initialize(self):
         """
@@ -377,30 +517,32 @@ class PostgreSQLStorageBackend(StorageBackend):
             cur.close()
         except Exception as e:
             logger.warning(
-                f"Could not create PostgreSQL database '{temp_db_name}' (might already exist or permissions issue): {e}")
+                f"Could not create PostgreSQL database '{temp_db_name}' "
+                f"(might already exist or permissions issue): {e}")
         finally:
             if temp_conn:
                 temp_conn.close()
 
+        # Initialize the connection pool
+        self._get_or_create_pool()
+
+        # Create table using a connection from the pool
+        conn = self._get_connection()
         try:
-            self._connection = self._get_connection()
-            self._create_table_if_not_exists()
+            self._create_table_if_not_exists(conn)
             logger.info(f"PostgreSQL backend initialized and connected.")
         except Exception as e:
             logger.critical(
                 f"Failed to initialize PostgreSQL backend: {e}", exc_info=True)
-            self.close()
             raise
+        finally:
+            self._return_connection(conn)
 
-    def _create_table_if_not_exists(self):
+    def _create_table_if_not_exists(self, conn: psycopg2.extensions.connection):
         """Creates the PostgreSQL table if it doesn't exist."""
-        if not self._connection:
-            logger.error("No active PostgreSQL connection to create table.")
-            raise ConnectionError("PostgreSQL connection not established.")
-
         cur = None
         try:
-            cur = self._connection.cursor()
+            cur = conn.cursor()
             create_table_query = pg_sql.SQL("""
             CREATE TABLE IF NOT EXISTS {} (
                 document_id VARCHAR(255) PRIMARY KEY,
@@ -428,14 +570,15 @@ class PostgreSQLStorageBackend(StorageBackend):
             );
             """).format(pg_sql.Identifier(self.table_name))
             cur.execute(create_table_query)
-            self._connection.commit()
+            conn.commit()
             logger.info(
                 f"PostgreSQL table '{self.table_name}' ensured to exist.")
         except Exception as e:
             logger.critical(
-                f"Failed to create PostgreSQL table '{self.table_name}': {e}", exc_info=True)
-            if self._connection:
-                self._connection.rollback()
+                f"Failed to create PostgreSQL table '{self.table_name}': {e}",
+                exc_info=True)
+            if conn:
+                conn.rollback()
             raise
         finally:
             if cur:
@@ -453,7 +596,8 @@ class PostgreSQLStorageBackend(StorageBackend):
                     data.temporal_metadata, '%Y-%m-%d').date()
             except ValueError:
                 logger.warning(
-                    f"Invalid temporal_metadata date format for document {data.document_id}: {data.temporal_metadata}. Storing as NULL.")
+                    f"Invalid temporal_metadata date format for document {data.document_id}: "
+                    f"{data.temporal_metadata}. Storing as NULL.")
 
         return {
             "document_id": data.document_id,
@@ -479,17 +623,25 @@ class PostgreSQLStorageBackend(StorageBackend):
             "cleaned_additional_metadata": json.dumps(data.cleaned_additional_metadata) if data.cleaned_additional_metadata is not None else None
         }
 
+    @retry(
+        stop=stop_after_attempt(MAX_RETRY_ATTEMPTS),
+        wait=wait_exponential(
+            multiplier=1, min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
+        retry=retry_if_exception_type(
+            (psycopg2.OperationalError, psycopg2.InterfaceError)),
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
     def save(self, data: PreprocessSingleResponse, **kwargs: Any) -> None:
-        """Saves a single processed article to PostgreSQL."""
-        if not self._connection:
-            logger.error(
-                f"No active PostgreSQL connection. Skipping save for document {data.document_id}.")
-            raise ConnectionError("PostgreSQL connection not established.")
-
+        """
+        Saves a single processed article to PostgreSQL.
+        
+        IMPROVEMENT: Uses connection pool and retry logic for resilience.
+        """
+        conn = self._get_connection()
         prepared_data = self._prepare_sql_data(data)
         cur = None
         try:
-            cur = self._connection.cursor()
+            cur = conn.cursor()
             columns = pg_sql.SQL(', ').join(
                 map(pg_sql.Identifier, prepared_data.keys()))
             placeholders = pg_sql.SQL(', ').join(
@@ -510,33 +662,44 @@ class PostgreSQLStorageBackend(StorageBackend):
             )
 
             cur.execute(insert_query, tuple(prepared_data.values()))
-            self._connection.commit()
+            conn.commit()
             logger.debug(
                 f"Saved single document {data.document_id} to PostgreSQL.")
         except Exception as e:
             logger.error(
-                f"Failed to save document {data.document_id} to PostgreSQL: {e}", exc_info=True)
-            if self._connection:
-                self._connection.rollback()
+                f"Failed to save document {data.document_id} to PostgreSQL: {e}",
+                exc_info=True)
+            if conn:
+                conn.rollback()
             raise
         finally:
             if cur:
                 cur.close()
+            self._return_connection(conn)
 
+    @retry(
+        stop=stop_after_attempt(MAX_RETRY_ATTEMPTS),
+        wait=wait_exponential(
+            multiplier=1, min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
+        retry=retry_if_exception_type(
+            (psycopg2.OperationalError, psycopg2.InterfaceError)),
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
     def save_batch(self, data_list: List[PreprocessSingleResponse], **kwargs: Any) -> None:
-        """Saves a batch of processed articles to PostgreSQL using executemany."""
-        if not self._connection:
-            logger.error(
-                "No active PostgreSQL connection. Skipping batch save.")
-            raise ConnectionError("PostgreSQL connection not established.")
+        """
+        Saves a batch of processed articles to PostgreSQL using executemany.
+        
+        IMPROVEMENT: Uses connection pool and retry logic for resilience.
+        """
         if not data_list:
             logger.debug(
                 "Attempted to save an empty batch to PostgreSQL. Skipping.")
             return
 
+        conn = self._get_connection()
         cur = None
         try:
-            cur = self._connection.cursor()
+            cur = conn.cursor()
             first_data = self._prepare_sql_data(data_list[0])
             columns = pg_sql.SQL(', ').join(
                 map(pg_sql.Identifier, first_data.keys()))
@@ -560,28 +723,31 @@ class PostgreSQLStorageBackend(StorageBackend):
             batch_values = [tuple(self._prepare_sql_data(
                 data).values()) for data in data_list]
             cur.executemany(insert_query, batch_values)
-            self._connection.commit()
+            conn.commit()
             logger.info(
                 f"Saved batch of {len(data_list)} documents to PostgreSQL.")
         except Exception as e:
             logger.error(
-                f"Failed to save batch to PostgreSQL: {e}", exc_info=True)
-            if self._connection:
-                self._connection.rollback()
+                f"Failed to save batch to PostgreSQL: {e}",
+                exc_info=True)
+            if conn:
+                conn.rollback()
             raise
         finally:
             if cur:
                 cur.close()
+            self._return_connection(conn)
 
     def close(self):
         """Closes the PostgreSQL connection."""
         if self._connection:
             try:
-                self._connection.close()
-                logger.info("PostgreSQL connection closed.")
+                self._return_connection(self._connection)
+                logger.info("PostgreSQL connection returned to pool.")
             except Exception as e:
                 logger.error(
-                    f"Error closing PostgreSQL connection: {e}", exc_info=True)
+                    f"Error returning PostgreSQL connection to pool: {e}",
+                    exc_info=True)
             finally:
                 self._connection = None
 
@@ -667,10 +833,12 @@ class StorageBackendFactory:
 
                 except (ValueError, ImportError, ConnectionError) as e:
                     logger.critical(
-                        f"Failed to initialize storage backend '{backend_name}': {e}. This backend will be skipped.", exc_info=True)
+                        f"Failed to initialize storage backend '{backend_name}': {e}. "
+                        f"This backend will be skipped.", exc_info=True)
                 except Exception as e:
                     logger.critical(
-                        f"An unexpected error occurred during initialization of backend '{backend_name}': {e}. Skipping.", exc_info=True)
+                        f"An unexpected error occurred during initialization of backend '{backend_name}': {e}. "
+                        f"Skipping.", exc_info=True)
             else:
                 backend = cls._initialized_backends[backend_name_lower]
                 active_backends.append(backend)
@@ -692,6 +860,17 @@ class StorageBackendFactory:
                     f"Error closing storage backend '{name}': {e}", exc_info=True)
             finally:
                 del cls._initialized_backends[name]
+
+        # Close PostgreSQL connection pool
+        if PostgreSQLStorageBackend._connection_pool:
+            try:
+                PostgreSQLStorageBackend._connection_pool.closeall()
+                logger.info("PostgreSQL connection pool closed.")
+            except Exception as e:
+                logger.error(
+                    f"Error closing PostgreSQL connection pool: {e}", exc_info=True)
+            finally:
+                PostgreSQLStorageBackend._connection_pool = None
 
 
 atexit.register(StorageBackendFactory.close_all_backends)
