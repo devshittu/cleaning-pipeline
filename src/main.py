@@ -5,6 +5,8 @@ Contains the core CLI logic for batch file processing using argparse.
 This file defines the `preprocess_file` function and helper logic,
 which will be called by `src/main_cli.py`.
 It now includes an option to submit batch jobs to Celery.
+
+FIXED: Added custom_cleaning_config parameter support
 """
 
 import logging
@@ -39,10 +41,20 @@ preprocessor = TextPreprocessor()
 logger.debug("src/main.py module loaded. Contains argparse CLI functions.")
 
 
-def _process_single_article(article_data: Dict[str, Any]) -> Optional[PreprocessFileResult]:
+def _process_single_article(
+    article_data: Dict[str, Any],
+    custom_cleaning_config: Optional[Dict[str, Any]] = None
+) -> Optional[PreprocessFileResult]:
     """
     Helper function to process a single article's data from the input file.
     This function includes the processing logic and error handling for one item.
+    
+    Args:
+        article_data: Raw article data dictionary
+        custom_cleaning_config: Optional custom cleaning configuration
+        
+    Returns:
+        PreprocessFileResult or None if processing fails
     """
     try:
         # 1. Input Data Validation: Validate the input data against the ArticleInput schema.
@@ -69,7 +81,8 @@ def _process_single_article(article_data: Dict[str, Any]) -> Optional[Preprocess
             sentiment=input_article.sentiment,
             word_count=input_article.word_count,
             publisher=input_article.publisher,
-            additional_metadata=input_article.additional_metadata
+            additional_metadata=input_article.additional_metadata,
+            custom_cleaning_config=custom_cleaning_config  # Pass custom config
         )
 
         # 3. Output Data Validation and return as dictionary
@@ -100,11 +113,22 @@ def _process_single_article(article_data: Dict[str, Any]) -> Optional[Preprocess
         return None
 
 
-def preprocess_file(input_path: str, output_path: str, use_celery: bool = False):
+def preprocess_file(
+    input_path: str,
+    output_path: str,
+    use_celery: bool = False,
+    custom_cleaning_config: Optional[Dict[str, Any]] = None
+):
     """
     Processes a file containing structured article objects (one per line) in parallel.
     Can optionally submit tasks to Celery for asynchronous processing.
     Saves results to storage backends in addition to the output file.
+    
+    Args:
+        input_path: Path to input JSONL file
+        output_path: Path to output JSONL file
+        use_celery: If True, submit to Celery workers; if False, process locally
+        custom_cleaning_config: Optional custom cleaning configuration dict
     """
     input_file_path = Path(input_path)
     output_file_path = Path(output_path)
@@ -134,7 +158,12 @@ def preprocess_file(input_path: str, output_path: str, use_celery: bool = False)
             try:
                 article_data = json.loads(line.strip())
                 # Send the article data to Celery task
-                task = preprocess_article_task.delay(json.dumps(article_data))
+                # Note: Celery tasks serialize to JSON, so we pass custom_cleaning_config separately
+                task = preprocess_article_task.delay(
+                    json.dumps(article_data),
+                    json.dumps(
+                        custom_cleaning_config) if custom_cleaning_config else None
+                )
                 task_results.append(task)
                 logger.debug(f"Submitted article {i+1} as Celery task: {task.id}", extra={
                              "document_id": article_data.get('document_id', 'N/A'), "task_id": task.id})
@@ -161,6 +190,7 @@ def preprocess_file(input_path: str, output_path: str, use_celery: bool = False)
                         # Convert dict result back to Pydantic model for consistency
                         processed_result = PreprocessFileResult(
                             document_id=result_dict.get("document_id", "N/A"),
+                            version="1.0",
                             processed_data=PreprocessSingleResponse.model_validate(
                                 result_dict)
                         )
@@ -191,7 +221,10 @@ def preprocess_file(input_path: str, output_path: str, use_celery: bool = False)
                 try:
                     article_data = json.loads(line.strip())
                     futures.append(executor.submit(
-                        _process_single_article, article_data))
+                        _process_single_article,
+                        article_data,
+                        custom_cleaning_config  # Pass custom config to worker
+                    ))
                 except json.JSONDecodeError as e:
                     logger.error(
                         f"Skipping malformed JSON line due to decode error: '{line.strip()[:100]}...'. Error: {e}")
