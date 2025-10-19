@@ -5,6 +5,7 @@ Defines the Celery application and tasks for asynchronous processing.
 
 FIXES APPLIED:
 - Fix #8: Enhanced retry logic with exponential backoff and jitter
+- FIXED: Added custom_cleaning_config parameter support
 """
 
 import json
@@ -15,7 +16,7 @@ from src.core.processor import TextPreprocessor
 from src.schemas.data_models import ArticleInput, PreprocessSingleResponse
 from src.utils.config_manager import ConfigManager
 from src.storage.backends import StorageBackendFactory
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 settings = ConfigManager.get_settings()
 logger = logging.getLogger("ingestion_service")
@@ -85,16 +86,28 @@ def cleanup_preprocessor(**kwargs):
     acks_late=True,  # Acknowledge task only after completion
     reject_on_worker_lost=True  # Reject task if worker dies
 )
-def preprocess_article_task(self, article_data_json: str, persist_to_backends: str = None) -> Dict[str, Any]:
+def preprocess_article_task(
+    self,
+    article_data_json: str,
+    custom_cleaning_config_json: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Celery task to preprocess a single article.
     It receives the article data as a JSON string to ensure proper serialization.
-    Optionally accepts a comma-separated list of storage backends to persist the processed result.
+    Optionally accepts custom cleaning configuration as JSON string.
+    
+    Args:
+        article_data_json: JSON string of article data
+        custom_cleaning_config_json: Optional JSON string of custom cleaning config
+        
+    Returns:
+        Dictionary with processed article data
     
     IMPROVEMENTS:
     - Fix #8: Exponential backoff with jitter for retries
     - Better error handling and logging
     - Automatic retry on transient failures
+    - Support for custom cleaning configuration
     """
     global preprocessor
     if preprocessor is None:
@@ -106,6 +119,22 @@ def preprocess_article_task(self, article_data_json: str, persist_to_backends: s
 
     document_id = "unknown"  # Default for logging in case of early failure
     try:
+        # Parse custom cleaning config if provided
+        custom_cleaning_config = None
+        if custom_cleaning_config_json:
+            try:
+                custom_cleaning_config = json.loads(
+                    custom_cleaning_config_json)
+                logger.debug(
+                    f"Using custom cleaning config: {custom_cleaning_config}",
+                    extra={"task_id": self.request.id}
+                )
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    f"Failed to parse custom_cleaning_config_json: {e}. Using default config.",
+                    extra={"task_id": self.request.id}
+                )
+
         # Pydantic's model_validate_json deserializes the JSON string back into a Pydantic model.
         article_input = ArticleInput.model_validate_json(article_data_json)
         document_id = article_input.document_id  # Update document_id for logging
@@ -136,7 +165,8 @@ def preprocess_article_task(self, article_data_json: str, persist_to_backends: s
             sentiment=article_input.sentiment,
             word_count=article_input.word_count,
             publisher=article_input.publisher,
-            additional_metadata=article_input.additional_metadata
+            additional_metadata=article_input.additional_metadata,
+            custom_cleaning_config=custom_cleaning_config  # Pass custom config
         )
 
         response = PreprocessSingleResponse(
@@ -167,10 +197,9 @@ def preprocess_article_task(self, article_data_json: str, persist_to_backends: s
                 "cleaned_additional_metadata")
         )
 
-        # Persist to specified storage backends or all configured backends if none specified
+        # Persist to storage backends (use default backends for Celery tasks)
         try:
-            backends = StorageBackendFactory.get_backends(
-                persist_to_backends.split(',') if persist_to_backends else None)
+            backends = StorageBackendFactory.get_backends()
             for backend in backends:
                 backend.save(response)
         except Exception as storage_error:
