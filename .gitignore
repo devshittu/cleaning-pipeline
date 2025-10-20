@@ -38,6 +38,7 @@ inference_logs.txt
 mlruns/
 mlflow.db
 
+.workflow/
 # IDE and editor files
 .vscode/
 .idea/
