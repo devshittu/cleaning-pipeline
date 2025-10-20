@@ -1117,6 +1117,19 @@ For issues, questions, or contributions:
 
 ---
 
+## Fallback 
+``` bash
+docker compose cp json_test_script.py ingestion-service:/app/         
+docker compose exec ingestion-service python /app/json_test_script.py
+
+---
+
+docker compose exec ingestion-service python -m src.main_cli process \
+  -i /app/data/input.jsonl \
+  -o /app/data/output.jsonl
+```
+---
+
 ## 🗺️ Roadmap
 
 - [ ] Add support for more languages (multilingual models)
